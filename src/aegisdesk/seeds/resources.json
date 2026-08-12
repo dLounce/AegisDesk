@@ -1,0 +1,62 @@
+[
+  {
+    "resource_id": "wiki",
+    "display_name": "Company Wiki",
+    "resource_class": "baseline",
+    "owning_department": null
+  },
+  {
+    "resource_id": "jira",
+    "display_name": "Issue Tracker",
+    "resource_class": "baseline",
+    "owning_department": null
+  },
+  {
+    "resource_id": "vpn",
+    "display_name": "Corporate VPN",
+    "resource_class": "baseline",
+    "owning_department": null
+  },
+  {
+    "resource_id": "slack",
+    "display_name": "Messaging",
+    "resource_class": "baseline",
+    "owning_department": null
+  },
+  {
+    "resource_id": "finance-reports",
+    "display_name": "Financial Reporting",
+    "resource_class": "sensitive",
+    "owning_department": "finance"
+  },
+  {
+    "resource_id": "hris",
+    "display_name": "HR Information System",
+    "resource_class": "sensitive",
+    "owning_department": "hr"
+  },
+  {
+    "resource_id": "sales-crm",
+    "display_name": "Sales CRM",
+    "resource_class": "sensitive",
+    "owning_department": "sales"
+  },
+  {
+    "resource_id": "prod-db",
+    "display_name": "Production Database",
+    "resource_class": "privileged",
+    "owning_department": "engineering"
+  },
+  {
+    "resource_id": "prod-k8s",
+    "display_name": "Production Kubernetes",
+    "resource_class": "privileged",
+    "owning_department": "engineering"
+  },
+  {
+    "resource_id": "payroll",
+    "display_name": "Payroll System",
+    "resource_class": "privileged",
+    "owning_department": "finance"
+  }
+]

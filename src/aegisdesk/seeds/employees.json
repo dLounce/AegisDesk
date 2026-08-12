@@ -1,0 +1,98 @@
+[
+  {
+    "employee_id": "E1001",
+    "display_name": "Amara Okonkwo",
+    "department": "engineering",
+    "role": "executive",
+    "manager_id": null,
+    "is_active": true
+  },
+  {
+    "employee_id": "E1002",
+    "display_name": "Daniel Reyes",
+    "department": "engineering",
+    "role": "manager",
+    "manager_id": "E1001",
+    "is_active": true
+  },
+  {
+    "employee_id": "E1042",
+    "display_name": "Priya Raghunathan",
+    "department": "engineering",
+    "role": "individual_contributor",
+    "manager_id": "E1002",
+    "is_active": true
+  },
+  {
+    "employee_id": "E1043",
+    "display_name": "Tomas Lindqvist",
+    "department": "engineering",
+    "role": "individual_contributor",
+    "manager_id": "E1002",
+    "is_active": true
+  },
+  {
+    "employee_id": "E1055",
+    "display_name": "Grace Mbeki",
+    "department": "operations",
+    "role": "it_admin",
+    "manager_id": "E1001",
+    "is_active": true
+  },
+  {
+    "employee_id": "E1056",
+    "display_name": "Hiroshi Tanaka",
+    "department": "operations",
+    "role": "individual_contributor",
+    "manager_id": "E1055",
+    "is_active": true
+  },
+  {
+    "employee_id": "E2010",
+    "display_name": "Louise Marchand",
+    "department": "finance",
+    "role": "manager",
+    "manager_id": "E1001",
+    "is_active": true
+  },
+  {
+    "employee_id": "E2011",
+    "display_name": "Owen Bradshaw",
+    "department": "finance",
+    "role": "individual_contributor",
+    "manager_id": "E2010",
+    "is_active": true
+  },
+  {
+    "employee_id": "E3020",
+    "display_name": "Nadia Haddad",
+    "department": "hr",
+    "role": "manager",
+    "manager_id": "E1001",
+    "is_active": true
+  },
+  {
+    "employee_id": "E4030",
+    "display_name": "Marcus Ellery",
+    "department": "sales",
+    "role": "individual_contributor",
+    "manager_id": "E1001",
+    "is_active": true
+  },
+  {
+    "employee_id": "E5040",
+    "display_name": "Ines Duarte",
+    "department": "product",
+    "role": "individual_contributor",
+    "manager_id": "E1001",
+    "is_active": true
+  },
+  {
+    "employee_id": "E9099",
+    "display_name": "Former Contractor",
+    "department": "engineering",
+    "role": "individual_contributor",
+    "manager_id": "E1002",
+    "is_active": false
+  }
+]
