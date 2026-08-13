@@ -1,0 +1,8 @@
+# Text files are stored and checked out with LF, on every platform.
+#
+# This repository is edited from Windows and from Linux containers. With the policy left
+# to each machine's core.autocrlf, the working tree came to differ from every blob in the
+# history without a single content change, which hides real diffs and would put whole-file
+# end-of-line churn into unrelated commits. Binary files are still detected by text=auto
+# and are never converted.
+* text=auto eol=lf
