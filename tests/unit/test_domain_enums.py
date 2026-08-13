@@ -6,8 +6,11 @@ from aegisdesk.domain.enums import (
     RISK_RANK,
     AccessDuration,
     AgentName,
+    ApprovalRefusalReason,
     ApprovalStatus,
     Capability,
+    GuardOutcome,
+    GuardRefusalReason,
     Permission,
     PolicyEffect,
     ProtectedOperation,
@@ -100,3 +103,39 @@ def test_approved_is_not_the_first_approval_status_member() -> None:
 def test_policy_effect_keeps_approval_distinct_from_allow_and_deny() -> None:
     assert len(PolicyEffect) == 3
     assert PolicyEffect.REQUIRE_APPROVAL not in (PolicyEffect.ALLOW, PolicyEffect.DENY)
+
+
+def test_refused_is_the_first_guard_outcome_and_executed_the_last() -> None:
+    # A positional default lands on the refusal, and neither of the other two can be reached by
+    # an off-by-one from either end.
+    assert list(GuardOutcome)[0] is GuardOutcome.REFUSED
+    assert list(GuardOutcome)[-1] is GuardOutcome.EXECUTED
+    assert GuardOutcome.AWAITING_APPROVAL not in (GuardOutcome.REFUSED, GuardOutcome.EXECUTED)
+
+
+def test_a_pending_outcome_is_distinct_from_a_refusal() -> None:
+    # A paused action is not a denied one, and the two are audited differently.
+    assert len(GuardOutcome) == 3
+
+
+def test_approval_refusal_reasons_are_distinct_from_guard_refusal_reasons() -> None:
+    # Two boundaries, two vocabularies: a reviewer decision and a protected proposal fail for
+    # different causes, and one enum covering both would let an audit line be read as either.
+    assert {reason.value for reason in ApprovalRefusalReason}.isdisjoint(
+        {reason.value for reason in GuardRefusalReason}
+    )
+
+
+def test_a_re_proposal_after_rejection_has_its_own_refusal_reason() -> None:
+    # Distinct from a lapse and from the resume path's APPROVAL_NOT_GRANTED, so that an agent
+    # re-proposing an action a human turned down is its own audit line.
+    assert (
+        len(
+            {
+                GuardRefusalReason.APPROVAL_ALREADY_REJECTED,
+                GuardRefusalReason.APPROVAL_LAPSED,
+                GuardRefusalReason.APPROVAL_NOT_GRANTED,
+            }
+        )
+        == 3
+    )

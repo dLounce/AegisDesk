@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from aegisdesk.approval import ApprovalPolicy
 from aegisdesk.backends.kb import KbDocument
 from aegisdesk.domain.employee import Employee
 from aegisdesk.domain.enums import (
@@ -17,7 +18,7 @@ from aegisdesk.domain.enums import (
     RiskTierConfiguration,
 )
 from aegisdesk.domain.errors import DomainInvariantError
-from aegisdesk.domain.ids import EmployeeId, ResourceId
+from aegisdesk.domain.ids import EmployeeId, ResourceId, ReviewerId
 from aegisdesk.domain.resource import Resource
 
 # Identifies the deliberately poisoned knowledge-base article. It carries injected
@@ -41,6 +42,14 @@ def _read_json(name: str) -> list[dict[str, Any]]:
         raise DomainInvariantError(f"{name} must contain a JSON array of objects")
     rows: list[dict[str, Any]] = payload
     return rows
+
+
+def _read_json_object(name: str) -> dict[str, Any]:
+    payload: Any = json.loads((_seeds_root() / name).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise DomainInvariantError(f"{name} must contain a JSON object")
+    fields: dict[str, Any] = payload
+    return fields
 
 
 def load_employees() -> Mapping[EmployeeId, Employee]:
@@ -139,6 +148,43 @@ def load_risk_tiers() -> RiskTierConfiguration:
     if missing:
         raise DomainInvariantError(f"risk tier corpus does not cover: {sorted(missing)}")
     return tiers
+
+
+# Who may decide an approval, stated one identifier at a time. project.md names reviewers but
+# states no rule for which of them may decide what, so the corpus lists them explicitly rather
+# than deriving them from EmployeeRole — a derived roster would put a company policy value into
+# code, which is the position AD-25 and AD-27 already took for baseline access.
+class _ReviewerRow(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    reviewer_id: ReviewerId
+
+
+def load_reviewers() -> frozenset[ReviewerId]:
+    rows = _read_json("reviewers.json")
+    parsed = [_ReviewerRow.model_validate(row) for row in rows]
+    roster = frozenset(row.reviewer_id for row in parsed)
+    if len(roster) != len(parsed):
+        raise DomainInvariantError("duplicate reviewer_id in seed data")
+
+    # Reviewers resolve through the same directory as employees (DESIGN.md AD-31), so a roster
+    # entry naming nobody is a reviewer who cannot authenticate. An inactive one is rejected
+    # here as corpus hygiene; the store re-reads is_active at decide time anyway, because a
+    # reviewer can be offboarded long after the corpus was written.
+    employees = load_employees()
+    unknown = sorted(str(reviewer) for reviewer in roster if EmployeeId(reviewer) not in employees)
+    if unknown:
+        raise DomainInvariantError(f"seed roster references unknown employees: {unknown}")
+    inactive = sorted(
+        str(reviewer) for reviewer in roster if not employees[EmployeeId(reviewer)].is_active
+    )
+    if inactive:
+        raise DomainInvariantError(f"seed roster names inactive employees: {inactive}")
+    return roster
+
+
+def load_approval_policy() -> ApprovalPolicy:
+    return ApprovalPolicy.model_validate(_read_json_object("approval_policy.json"))
 
 
 def load_kb_documents() -> Sequence[KbDocument]:

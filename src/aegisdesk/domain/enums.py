@@ -149,10 +149,13 @@ class ActorType(Enum):
     BACKEND = "backend"
 
 
-# What the runtime guard did. Two members, so no caller can read a refusal as a qualified
-# success. REFUSED is first, so code reaching for a positional default lands on the refusal.
+# What the runtime guard did. AWAITING_APPROVAL is a third outcome rather than a flavour of
+# refusal, because a paused action is not a denied one and the two are audited differently.
+# REFUSED is still first, so code reaching for a positional default lands on the refusal, and
+# EXECUTED is last, so neither of the other two can be reached by an off-by-one.
 class GuardOutcome(Enum):
     REFUSED = "refused"
+    AWAITING_APPROVAL = "awaiting_approval"
     EXECUTED = "executed"
 
 
@@ -167,6 +170,32 @@ class GuardRefusalReason(Enum):
     UNRESOLVED_RESOURCE = "unresolved_resource"
     UNCLASSIFIED_RISK = "unclassified_risk"
     POLICY_REFUSED = "policy_refused"
+    APPROVAL_LIMIT_REACHED = "approval_limit_reached"
+    # A proposal that found a record already decided against, or one that has lapsed. Separated
+    # so that an agent re-proposing an action a human turned down is a distinct audit line from
+    # a request that simply timed out.
+    APPROVAL_ALREADY_REJECTED = "approval_already_rejected"
+    APPROVAL_LAPSED = "approval_lapsed"
+    # The five checks the resume path runs against the authoritative approval record.
+    NO_APPROVAL_RECORD = "no_approval_record"
+    APPROVAL_NOT_GRANTED = "approval_not_granted"
+    ARGUMENT_DIGEST_MISMATCH = "argument_digest_mismatch"
+    DECISION_TUPLE_MISMATCH = "decision_tuple_mismatch"
+    REVIEWER_NOT_ELIGIBLE = "reviewer_not_eligible"
+    EXPIRED_GRANT_REPLAY = "expired_grant_replay"
+
+
+# Why the approval store refused a reviewer decision. Kept off the exception message for the
+# same reason the guard keeps its refusal reason off the model's reply: a caller comparing
+# messages could otherwise learn which approvals exist and which reviewers are on the roster.
+class ApprovalRefusalReason(Enum):
+    UNTRUSTED_REVIEWER_SESSION = "untrusted_reviewer_session"
+    MALFORMED_DECISION = "malformed_decision"
+    REVIEWER_NOT_ON_ROSTER = "reviewer_not_on_roster"
+    REVIEWER_INACTIVE = "reviewer_inactive"
+    UNKNOWN_APPROVAL = "unknown_approval"
+    SELF_APPROVAL = "self_approval"
+    ILLEGAL_TRANSITION = "illegal_transition"
 
 
 # The risk tier in force for a resolved request, supplied as configuration. project.md 9

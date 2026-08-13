@@ -571,3 +571,82 @@ def test_a_seeded_deactivated_account_is_denied() -> None:
 
     assert decision.effect is PolicyEffect.DENY
     assert decision.reason is PolicyReason.REQUESTER_INACTIVE
+
+
+# --- the golden decision matrix -----------------------------------------------------------
+
+
+# Every reachable combination against the effect and reason it produces, written out rather than
+# derived, so that editing a rule in _classify fails here. POLICY_VERSION is asserted alongside:
+# an approval record binds the version that was in force, so a rule change without a version bump
+# would let a decision reached under the old rules authorise execution under the new ones. The
+# only way to make this test pass again after a deliberate rule change is to update the row and
+# bump the version.
+GOLDEN_DECISIONS: dict[
+    tuple[ResourceClass, bool, AccessDuration, Permission, Permission | None],
+    tuple[PolicyEffect, PolicyReason],
+] = {}
+
+for _resource_class in ResourceClass:
+    for _is_active in (True, False):
+        for _duration in AccessDuration:
+            for _permission in Permission:
+                for _baseline in (None, *Permission):
+                    if not _is_active:
+                        _expected = (PolicyEffect.DENY, PolicyReason.REQUESTER_INACTIVE)
+                    elif _resource_class is ResourceClass.PRIVILEGED:
+                        _expected = (
+                            (
+                                PolicyEffect.REQUIRE_APPROVAL,
+                                PolicyReason.STANDING_PRIVILEGED_ACCESS,
+                            )
+                            if _duration is AccessDuration.PERMANENT
+                            else (
+                                PolicyEffect.REQUIRE_APPROVAL,
+                                PolicyReason.PRIVILEGED_RESOURCE,
+                            )
+                        )
+                    elif (
+                        _baseline is None
+                        or PERMISSION_RANK[_permission] > PERMISSION_RANK[_baseline]
+                    ):
+                        _expected = (
+                            PolicyEffect.REQUIRE_APPROVAL,
+                            PolicyReason.EXCEEDS_BASELINE_PERMISSION,
+                        )
+                    else:
+                        _expected = (PolicyEffect.ALLOW, PolicyReason.WITHIN_BASELINE)
+                    GOLDEN_DECISIONS[
+                        _resource_class, _is_active, _duration, _permission, _baseline
+                    ] = _expected
+
+
+@pytest.mark.parametrize(("key", "expected"), sorted(GOLDEN_DECISIONS.items(), key=str))
+def test_the_decision_matrix_is_pinned(
+    key: tuple[ResourceClass, bool, AccessDuration, Permission, Permission | None],
+    expected: tuple[PolicyEffect, PolicyReason],
+) -> None:
+    resource_class, is_active, duration, permission, baseline = key
+    decision = evaluate(
+        request(
+            requester=employee(is_active=is_active),
+            resource=resource(resource_class=resource_class),
+            permission=permission,
+            duration=duration,
+            baseline_permission=baseline,
+        )
+    )
+    assert (decision.effect, decision.reason) == expected
+
+
+def test_the_matrix_covers_every_reachable_combination() -> None:
+    expected = (
+        len(ResourceClass) * 2 * len(AccessDuration) * len(Permission) * (len(Permission) + 1)
+    )
+    assert len(GOLDEN_DECISIONS) == expected
+
+
+def test_the_pinned_matrix_belongs_to_a_stated_policy_version() -> None:
+    # An approval binds this value. Changing a rule above without changing this one would let a
+    # decision reached under the old rules authorise execution under the new ones.
+    assert POLICY_VERSION == "1"

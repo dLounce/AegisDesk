@@ -1,3 +1,6 @@
+from aegisdesk.domain.enums import ApprovalRefusalReason
+
+
 class AegisDeskError(Exception):
     pass
 
@@ -46,4 +49,20 @@ class SessionAuthenticationError(AegisDeskError):
 # produced. The backend has no other entry point, so this is what a caller that skipped the
 # authorization path meets.
 class ProtectedExecutionError(AegisDeskError):
+    pass
+
+
+# Raised for every refused reviewer decision, with one message for all of them. The precise
+# cause travels on `reason`, which is bound for the audit trail rather than for a caller
+# comparing replies.
+class ApprovalDecisionError(AegisDeskError):
+    def __init__(self, reason: ApprovalRefusalReason) -> None:
+        super().__init__("the approval decision was refused")
+        self.reason = reason
+
+
+# Raised when a workflow already holds as many pending approvals as it is allowed. Separate
+# from the decision error because it is refused on the proposing side, before any reviewer
+# is involved.
+class ApprovalCapacityError(AegisDeskError):
     pass

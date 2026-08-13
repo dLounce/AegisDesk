@@ -63,8 +63,10 @@ Binding an approval to an action identifier alone would allow arguments to chang
 approval and execution. The approval record stores a digest of the canonical argument set;
 resume recomputes it and fails closed on any mismatch.
 
-*Status: partially implemented.* The digest is computed and carried on every resolved
-proposal; the approval record that binds to it lands with the approval store.
+*Status: implemented.* The digest is computed on every resolved proposal, stored on the
+approval record, and recomputed and compared by `RuntimeGuard.execute_approved`. Because the
+digest covers the policy version, a rule edit between approval and execution shows up here as a
+mismatch that can be reported.
 
 ### AD-4 — Action identifiers are derived deterministically
 
@@ -81,9 +83,10 @@ A direct consequence of AD-4. Proposal persistence and the corresponding audit w
 idempotent upserts, so a second pass over the same code is a no-op rather than a
 duplicate.
 
-*Status: partially implemented.* The path from proposal to decision performs reads only and
-returns identical values when run twice. Proposal persistence and the audit write do not
-exist yet, so the idempotency they require is a stated rule rather than shipped behaviour.
+*Status: partially implemented.* Proposal persistence now exists and is insert-if-absent under
+the workflow and action identifiers, so repeating the pre-pause pass produces one record with one
+creation time and does not reset a decision. The audit write does not exist yet, so the
+idempotency it will require is still a stated rule rather than shipped behaviour.
 
 ### AD-6 — Agents may propose privileged actions; they may not execute them
 
@@ -91,9 +94,10 @@ Capability sets distinguish proposing from executing. No agent holds execute aut
 protected operations. Execution authority belongs to the runtime, and only after an
 authoritative approval has been read back from the store.
 
-*Status: partially implemented.* Capability sets distinguish proposing from executing, and
-no agent holds execute authority. Execution after an authoritative approval lands with the
-approval store; until then an effect other than ALLOW is refused.
+*Status: implemented.* Capability sets distinguish proposing from executing, no agent holds
+execute authority, and execution after an approval happens inside the runtime guard against a
+record it fetched for itself. Proposing an approval-requiring action returns a pending outcome;
+only `execute_approved` can turn one into a grant.
 
 ### AD-7 — Classification runs on every inbound message
 
@@ -192,10 +196,11 @@ approvals already issued.
 
 ### AD-34 — Resume fetches by derived identity and compares the semantic decision
 
-The approval record is fetched by the workflow and action identifiers the resuming workflow
-derives for itself, never by an identifier supplied in the resume payload. A payload-supplied
-key would let a genuine approval for one action authorise a different one, and every subsequent
-check would pass because the record itself is real.
+The approval record is fetched by the workflow and action identifiers **the runtime guard
+derives inside `execute_approved`**, never by an identifier supplied in the resume payload and
+never by one carried over from the proposing pass. A payload-supplied key would let a genuine
+approval for one action authorise a different one, and every subsequent check would pass because
+the record itself is real.
 
 Execution then requires that the re-evaluated policy version, effect, reason, requester,
 resource, permission and duration are identical to the tuple recorded on the approval. Whole
@@ -204,7 +209,8 @@ proposing pass and the resuming one. Any difference in the semantic tuple fails 
 including a change that would now permit the action outright, because a changed world is a
 world the reviewer did not authorise.
 
-*Status: not started.* The rule is fixed here; the approval store that applies it lands next.
+*Status: implemented.* `RuntimeGuard.execute_approved` derives the key, and the five checks it
+runs are listed under AD-38.
 
 ### AD-35 — One refusal sentence to the model, the precise reason to the audit trail
 
@@ -256,6 +262,144 @@ boundary with its own authorisation.
 
 *Status: implemented.*
 
+### AD-38 — The resume path is a second guard method that re-resolves everything
+
+Approval creates a second way into protected execution, and where it lives decides whether the
+first one's guarantees survive. `RuntimeGuard.execute_approved` therefore takes exactly what
+`propose` takes — an agent, a session, a workflow identifier and a proposed action — and repeats
+the whole resolution sequence before looking anything up.
+
+Nothing resolved may be handed back in. A `ResolvedAction` is an importable, constructible record
+with no provenance, so a caller that built one naming another requester and then derived the
+identifier and the digest from that same record would produce a self-consistent triple: the
+identifier would match, the digest would match, and every comparison would pass because both
+sides came from the caller. That is the shape of the three defects already closed for
+caller-built resources, caller-supplied baselines and look-alike sessions. The method signature
+is the control: there is no parameter for a resolved action, an action identifier, an argument
+digest, a policy decision, an approval identifier or an approval record.
+
+The minting key stays private to the guard for the same reason. Handing it to a store or a
+workflow node so that something else could execute would make the backend's single minting
+authority decorative.
+
+Having re-resolved, the guard runs five checks against the record and fails closed on each: the
+record exists under the derived key; its effective status is approved; the recomputed argument
+digest matches; the re-evaluated decision tuple matches; and the reviewer who decided is still
+eligible. The fourth refuses even when the re-evaluated decision would now permit the action
+outright.
+
+*Status: implemented.*
+
+### AD-39 — Only an approval-requiring decision opens a record
+
+`REQUIRE_APPROVAL` opens an authoritative record and returns; `DENY` writes nothing and `ALLOW`
+executes without one. A denied action reaching a reviewer would let a human authorise what policy
+already refused, which is the precedence the rule order exists to preserve, so the record type
+refuses to hold anything but a `REQUIRE_APPROVAL` decision.
+
+Opening is insert-if-absent under `(workflow_id, action_id)`. Everything before a pause runs
+again on resume, so a repeated pass returns the record the first one wrote — same identifier,
+same creation time, same status. A rejection is therefore not reset by re-proposing, and a
+reviewer is not notified twice for one action.
+
+Because the record that comes back may already be decided, the proposing pass reads its state
+rather than assuming it is pending. A pending record and an approved one are both gated: the
+proposing pass never executes, so the action is still waiting on the resume path either way, and
+both report the same sentence so that a reply cannot tell an agent the moment its action cleared
+the gate. A rejected record and a lapsed one are refusals with reasons of their own, because
+reporting a pending outcome for either would tell a workflow to wait for a decision that has
+already been made or can no longer be made — and, in the rejected case, would hand an agent a
+second reviewer for an action a human turned down. The states that may report gated are a
+permit-list, so a status with no entry refuses.
+
+A workflow may hold only a bounded number of pending records. Because a derived identifier makes
+a re-proposal idempotent, the way to manufacture reviewer fatigue is to vary one field until the
+queue is full of near-identical requests; the bound is a containment limit of the kind the
+project already applies to handoffs and tool calls, not a policy value.
+
+*Status: implemented.*
+
+### AD-40 — Reviewer authorisation is a stated roster, not a derived role
+
+No governing document says which employees may decide which approvals. Deriving a roster from
+`EmployeeRole` would put a company policy value into code, which the policy engine has
+consistently declined to do, so the roster is explicit seed configuration: a flat list of
+identifiers, with absence a refusal. It is deliberately not keyed on resource class or risk tier,
+because no document states such a scoping rule either.
+
+Eligibility is three questions, asked when the decision is made and asked again when the workflow
+resumes: is this identifier on the roster, is the person still active, and are they someone other
+than the requester. Roster membership is matched exactly, because it asks whether an identifier
+was issued. Self-approval is compared case-insensitively, because it asks whether two identifiers
+name the same person, and a spelling that differs only in case must still count as the same
+person rather than as a way past the rule.
+
+**Known limitation.** `authenticate_reviewer` verifies a well-formed identifier against the
+directory. It is not a credential check and is not cryptographic authentication. Until it is, the
+strength of the approval boundary is bounded by "an attacker who knows a second valid employee
+identifier that appears on the roster", and the roster is what bounds it.
+
+*Status: implemented.*
+
+### AD-41 — Approval expiry is derived from the record, never written to it
+
+A record carries two deadlines: how long a reviewer has to decide, and how long an approval stays
+executable once granted. Both are read from the record rather than swept into it by a job, so the
+answer does not depend on whether the sweep ran, and a resume cannot find a record that a crash
+left un-expired. `EXPIRED` is consequently not a status anything stores and not a destination in
+the transition permit-list, which leaves the reviewer's own decision as the only write.
+
+The two windows answer different questions. The pending window bounds how long a request may sit
+in a queue. The approved window bounds the gap between a human authorising an action and the
+action happening, which is the interval in which the world can change underneath a decision
+already made.
+
+`SUPERSEDED` stays reserved and unreachable. Because the action identifier is derived, an amended
+action is a different action with its own record, and the original lapses on its own deadline.
+
+*Status: implemented.*
+
+### AD-42 — The guard owns an injected clock
+
+Approval freshness, grant windows and lapsed-replay checks are all decisions about time, so the
+instant is not a per-call argument. A caller that supplied it could make a stale approval look
+fresh and could choose the window of every grant it asked for. The guard and the approval store
+each take a clock at construction, in the way the ticket store already does, which keeps tests
+deterministic without any component reading the system clock at the point of use.
+
+*Status: implemented.*
+
+### AD-43 — Awaiting approval is a third outcome, not a flavour of refusal
+
+A paused action is not a denied one: it produces a record, it is audited differently, and the
+workflow has to pause rather than report a refusal. The guard outcome therefore has three
+members, and the outcome record's invariants differ per member — an executed outcome carries a
+grant, a pending outcome carries an approval identifier and no grant, and a refusal carries a
+reason and neither.
+
+This is the one distinction the model is allowed to draw. Refusals all share a single sentence so
+that a compromised agent cannot search the argument space by comparing replies; a pending action
+gets its own sentence, because the employee is told a human is looking. That sentence still names
+no resource, no rule and no reviewer, and the precise refusal reason continues to travel only on
+the outcome record.
+
+*Status: implemented.*
+
+### AD-44 — A lapsed grant is not replayed as a success
+
+The access backend returns the grant it already issued for an action identifier, which is what
+makes a retried execution safe. Once that grant's window has closed, returning it would report a
+success that is not one: the outcome would say the access was granted while the grant it carried
+had already expired, and the audit trail would read as a fresh authorisation. A replay in that
+state is refused instead, and a renewal has to be a new action — new ticket, new identifier, new
+digest, new approval.
+
+This is narrowly a replay check on the execution path. Nothing in the system yet revokes a grant
+or checks one at the time it is used, and `PERMANENT` grants have no window at all. Use-time
+enforcement is a later concern and is not claimed here.
+
+*Status: implemented.*
+
 ## 4. Pause and resume semantics
 
 This is the most consequential runtime behaviour in the system and is treated as a hard
@@ -280,7 +424,11 @@ insert-if-absent under the workflow identifier, action identifier and event type
 the application sees it, idempotent under replay. Counting a replay as a fresh protected-action
 attempt would corrupt the security metrics and make a retry indistinguishable from an attack.
 
-*Status: verified as achievable against the workflow runtime; not yet implemented.*
+*Status: partially implemented.* The two passes exist as `RuntimeGuard.propose` and
+`RuntimeGuard.execute_approved`, they share their resolution sequence by construction, and the
+proposal write between them is idempotent. What is not built is the workflow that pauses between
+them and the audit write on either side, so the ordering is enforced by the code that exists
+rather than demonstrated across a real checkpoint.
 
 ## 5. Durability
 
@@ -328,10 +476,10 @@ not as a compliance claim. Every row will carry an honest status of *implemented
 | Tool misuse | Strict argument schemas, enumerated permissions, resource catalogue | Partial |
 | Identity and privilege abuse | Session-derived identity, self-scoped reads, least-privilege capabilities | Partial |
 | Unexpected code execution | No arbitrary execution capability exists | Not started |
-| Memory and context poisoning | Authoritative approval lookup; conversation text cannot authorize | Not started |
+| Memory and context poisoning | Authoritative approval lookup; conversation text cannot authorize | Partial — the store is authoritative and no path reaches it from text; the workflow memory it will sit beside does not exist yet |
 | Insecure inter-agent communication | Structured typed handoffs with explicit reasons | Not started |
 | Cascading failures | Turn, handoff, and tool-call limits; fail-closed defaults | Not started |
-| Human-agent trust exploitation | Reviewers see the raw proposed action, not a model summary | Not started |
+| Human-agent trust exploitation | Reviewers see the raw proposed action, not a model summary | Partial — the approval record holds the resolved action and the policy decision and carries no agent prose; no reviewer interface exists yet |
 | Rogue agent behaviour | Fixed capability sets and termination limits | Partial — capability sets exist, termination limits do not |
 
 ## 8. Testing approach

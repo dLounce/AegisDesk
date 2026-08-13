@@ -5,12 +5,15 @@ import pytest
 
 from aegisdesk.action import ProposedAction
 from aegisdesk.backends.access import AccessBackend
+from aegisdesk.backends.approvals import InMemoryApprovalStore
 from aegisdesk.backends.catalog import ResourceCatalog
 from aegisdesk.backends.directory import DirectoryBackend
 from aegisdesk.backends.seed import (
+    load_approval_policy,
     load_baseline_access,
     load_employees,
     load_resources,
+    load_reviewers,
     load_risk_tiers,
 )
 from aegisdesk.backends.tickets import InMemoryTicketStore
@@ -29,7 +32,7 @@ from aegisdesk.domain.enums import (
 )
 from aegisdesk.domain.errors import ProtectedExecutionError
 from aegisdesk.domain.ids import ActionId, EmployeeId, ResourceId, ReviewerId, TicketId, WorkflowId
-from aegisdesk.guard import REFUSAL_MESSAGE, RuntimeGuard
+from aegisdesk.guard import PENDING_MESSAGE, REFUSAL_MESSAGE, RuntimeGuard
 from aegisdesk.session import (
     ReviewerSessionContext,
     authenticate_employee,
@@ -77,18 +80,34 @@ class RecordingAccess(AccessBackend):
         return super().grant(receipt, minting_key)
 
 
+class Clock:
+    """A clock the test moves, so the guard reads time from one place it does not choose."""
+
+    def __init__(self, at: datetime) -> None:
+        self.at = at
+
+    def __call__(self) -> datetime:
+        return self.at
+
+
 class Fixture:
     def __init__(self, risk_tiers: Any = None) -> None:
+        self.clock = Clock(AT)
         self.directory = RecordingDirectory(load_employees(), load_baseline_access())
         self.catalog = RecordingCatalog(load_resources())
         self.tickets = InMemoryTicketStore(clock=lambda: AT)
         self.access = RecordingAccess()
+        self.approvals = InMemoryApprovalStore(
+            self.directory, load_reviewers(), load_approval_policy(), self.clock
+        )
         self.guard = RuntimeGuard(
             self.directory,
             self.catalog,
             self.tickets,
             load_risk_tiers() if risk_tiers is None else risk_tiers,
             self.access,
+            self.approvals,
+            self.clock,
         )
         self.own_ticket = self.tickets.create(EmployeeId(SELF), "access request").ticket_id
         self.other_ticket = self.tickets.create(EmployeeId(OTHER), "unrelated").ticket_id
@@ -110,7 +129,6 @@ class Fixture:
         duration: AccessDuration = AccessDuration.ONE_HOUR,
         ticket_id: TicketId | None = None,
         action: Any = _UNSET,
-        now: datetime = AT,
     ) -> Any:
         proposal = (
             action
@@ -124,7 +142,7 @@ class Fixture:
             )
         )
         return self.guard.propose(
-            agent, self.session if session is _UNSET else session, WORKFLOW, proposal, now
+            agent, self.session if session is _UNSET else session, WORKFLOW, proposal
         )
 
 
@@ -205,7 +223,7 @@ def test_the_baseline_is_read_from_the_directory(fixture: Fixture) -> None:
 
 def test_a_resource_the_requester_holds_no_baseline_on_escalates(fixture: Fixture) -> None:
     outcome = fixture.propose(resource_id="finance-reports")
-    assert outcome.outcome is GuardOutcome.REFUSED
+    assert outcome.outcome is GuardOutcome.AWAITING_APPROVAL
     assert outcome.decision is not None
     assert outcome.decision.reason is PolicyReason.EXCEEDS_BASELINE_PERMISSION
 
@@ -251,10 +269,10 @@ def test_a_ticket_that_does_not_exist_is_refused(fixture: Fixture) -> None:
 # --- policy outcomes ----------------------------------------------------------------------------
 
 
-def test_a_privileged_resource_is_refused_and_not_executed(fixture: Fixture) -> None:
+def test_a_privileged_resource_pauses_for_approval_and_does_not_execute(fixture: Fixture) -> None:
     outcome = fixture.propose(resource_id="prod-db")
-    assert outcome.outcome is GuardOutcome.REFUSED
-    assert outcome.refusal_reason is GuardRefusalReason.POLICY_REFUSED
+    assert outcome.outcome is GuardOutcome.AWAITING_APPROVAL
+    assert outcome.refusal_reason is None
     assert outcome.decision is not None
     assert outcome.decision.effect is PolicyEffect.REQUIRE_APPROVAL
     assert outcome.decision.reason is PolicyReason.PRIVILEGED_RESOURCE
@@ -265,12 +283,13 @@ def test_a_privileged_resource_is_refused_and_not_executed(fixture: Fixture) -> 
 def test_an_approval_requiring_proposal_keeps_its_identity_for_the_audit_path(
     fixture: Fixture,
 ) -> None:
-    # S8 binds an approval to these values, so they survive the refusal even though nothing
-    # executed.
+    # The approval record binds to these values, so they travel on the pending outcome even
+    # though nothing executed.
     outcome = fixture.propose(resource_id="prod-db", duration=AccessDuration.PERMANENT)
     assert outcome.resolved is not None
     assert outcome.action_id is not None
     assert outcome.argument_digest is not None
+    assert outcome.approval_id is not None
     assert outcome.decision is not None
     assert outcome.decision.reason is PolicyReason.STANDING_PRIVILEGED_ACCESS
 
@@ -293,24 +312,34 @@ def test_an_inactive_requester_is_denied(fixture: Fixture) -> None:
 def test_the_refusal_text_is_the_same_whatever_the_reason(fixture: Fixture) -> None:
     # A refusal that named its cause would let a compromised agent search the argument space by
     # comparing replies until one combination is permitted.
+    inactive = authenticate_employee(INACTIVE, fixture.directory, AT)
     refusals = [
         fixture.propose(agent=AgentName.RESOLVER),
         fixture.propose(resource_id="prod-db-staging"),
         fixture.propose(ticket_id=fixture.other_ticket),
-        fixture.propose(resource_id="prod-db"),
-        fixture.propose(permission=Permission.ADMIN),
-        fixture.propose(resource_id="finance-reports"),
+        fixture.propose(session=inactive, ticket_id=fixture.inactive_ticket),
+        fixture.propose(session=None),
+        fixture.propose(action=None),
     ]
     assert {outcome.message for outcome in refusals} == {REFUSAL_MESSAGE}
     assert all(outcome.outcome is GuardOutcome.REFUSED for outcome in refusals)
 
 
+def test_a_pending_action_is_told_apart_from_a_refused_one(fixture: Fixture) -> None:
+    # The one distinction the model may draw, because the workflow pauses and the employee is
+    # told a human is looking. It still names no resource, no rule and no reviewer.
+    pending = fixture.propose(resource_id="prod-db")
+    assert pending.message == PENDING_MESSAGE
+    assert pending.message != REFUSAL_MESSAGE
+
+
 def test_the_precise_reason_is_kept_for_the_audit_trail(fixture: Fixture) -> None:
+    inactive = authenticate_employee(INACTIVE, fixture.directory, AT)
     reasons = {
         fixture.propose(agent=AgentName.RESOLVER).refusal_reason,
         fixture.propose(resource_id="prod-db-staging").refusal_reason,
         fixture.propose(ticket_id=fixture.other_ticket).refusal_reason,
-        fixture.propose(resource_id="prod-db").refusal_reason,
+        fixture.propose(session=inactive, ticket_id=fixture.inactive_ticket).refusal_reason,
     }
     assert reasons == {
         GuardRefusalReason.MISSING_CAPABILITY,
@@ -378,8 +407,9 @@ def test_two_distinct_actions_receive_distinct_identifiers(fixture: Fixture) -> 
 def test_a_later_clock_changes_the_decision_record_but_not_the_binding(fixture: Fixture) -> None:
     # Comparing whole decision records on resume cannot work, because evaluated_at legitimately
     # differs between the proposing pass and the resuming one. The binding values do not.
-    first = fixture.propose(resource_id="prod-db", now=AT)
-    second = fixture.propose(resource_id="prod-db", now=AT + timedelta(hours=2))
+    first = fixture.propose(resource_id="prod-db")
+    fixture.clock.at = AT + timedelta(hours=2)
+    second = fixture.propose(resource_id="prod-db")
     assert first.decision != second.decision
     assert first.action_id == second.action_id
     assert first.argument_digest == second.argument_digest
@@ -468,6 +498,8 @@ def test_a_second_guard_cannot_bind_to_a_backend_that_has_an_authority(
             fixture.tickets,
             load_risk_tiers(),
             fixture.access,
+            fixture.approvals,
+            fixture.clock,
         )
 
 

@@ -5,10 +5,15 @@ import pytest
 
 from aegisdesk.backends import seed
 from aegisdesk.backends.catalog import ResourceCatalog
-from aegisdesk.backends.seed import load_employees, load_resources
+from aegisdesk.backends.seed import (
+    load_approval_policy,
+    load_employees,
+    load_resources,
+    load_reviewers,
+)
 from aegisdesk.domain.enums import Department, ResourceClass
 from aegisdesk.domain.errors import DomainInvariantError, UnknownResourceError
-from aegisdesk.domain.ids import ResourceId
+from aegisdesk.domain.ids import EmployeeId, ResourceId, ReviewerId
 
 
 def test_every_department_is_represented() -> None:
@@ -110,3 +115,100 @@ def test_dangling_manager_reference_is_rejected(
     monkeypatch.setattr(seed, "_seeds_root", lambda: tmp_path)
     with pytest.raises(DomainInvariantError, match="unknown managers"):
         seed.load_employees()
+
+
+# --- the reviewer roster ------------------------------------------------------------------
+
+
+def test_the_roster_names_only_known_active_employees() -> None:
+    employees = load_employees()
+    roster = load_reviewers()
+    assert roster
+    for reviewer in roster:
+        assert employees[EmployeeId(reviewer)].is_active
+
+
+def test_no_reviewer_is_also_a_fixture_requester() -> None:
+    # The self-approval rule would otherwise pass for the wrong reason in the guard fixtures.
+    roster = load_reviewers()
+    assert roster.isdisjoint({ReviewerId("E1042"), ReviewerId("E1043"), ReviewerId("E9099")})
+
+
+def test_the_roster_is_stated_rather_than_derived_from_a_role() -> None:
+    # Deriving reviewers from EmployeeRole would put a company policy value into code, which is
+    # the position taken for baseline access and risk tiers.
+    employees = load_employees()
+    roles = {employees[EmployeeId(reviewer)].role for reviewer in load_reviewers()}
+    assert len(roles) > 1
+
+
+def test_a_roster_entry_naming_nobody_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_employees(tmp_path)
+    (tmp_path / "reviewers.json").write_text(
+        json.dumps([{"reviewer_id": "E9999"}]), encoding="utf-8"
+    )
+    monkeypatch.setattr(seed, "_seeds_root", lambda: tmp_path)
+    with pytest.raises(DomainInvariantError, match="unknown employees"):
+        seed.load_reviewers()
+
+
+def test_a_duplicate_roster_entry_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_employees(tmp_path)
+    (tmp_path / "reviewers.json").write_text(
+        json.dumps([{"reviewer_id": "E1042"}, {"reviewer_id": "E1042"}]), encoding="utf-8"
+    )
+    monkeypatch.setattr(seed, "_seeds_root", lambda: tmp_path)
+    with pytest.raises(DomainInvariantError, match="duplicate reviewer_id"):
+        seed.load_reviewers()
+
+
+def test_an_inactive_roster_entry_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_employees(tmp_path, is_active=False)
+    (tmp_path / "reviewers.json").write_text(
+        json.dumps([{"reviewer_id": "E1042"}]), encoding="utf-8"
+    )
+    monkeypatch.setattr(seed, "_seeds_root", lambda: tmp_path)
+    with pytest.raises(DomainInvariantError, match="inactive employees"):
+        seed.load_reviewers()
+
+
+def _seed_employees(tmp_path: Path, is_active: bool = True) -> None:
+    (tmp_path / "employees.json").write_text(
+        json.dumps(
+            [
+                {
+                    "employee_id": "E1042",
+                    "display_name": "Priya Raghunathan",
+                    "department": "engineering",
+                    "role": "individual_contributor",
+                    "manager_id": None,
+                    "is_active": is_active,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+# --- the approval time-box corpus ---------------------------------------------------------
+
+
+def test_the_approval_time_boxes_are_the_configured_values() -> None:
+    policy = load_approval_policy()
+    assert policy.pending_ttl_hours == 72
+    assert policy.approved_ttl_hours == 4
+
+
+def test_an_approval_policy_that_is_not_an_object_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "approval_policy.json").write_text(json.dumps([]), encoding="utf-8")
+    monkeypatch.setattr(seed, "_seeds_root", lambda: tmp_path)
+    with pytest.raises(DomainInvariantError, match="must contain a JSON object"):
+        seed.load_approval_policy()
