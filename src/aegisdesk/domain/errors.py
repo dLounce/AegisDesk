@@ -33,3 +33,10 @@ class TicketNotFoundError(AegisDeskError):
 
 class IllegalTicketTransitionError(AegisDeskError):
     pass
+
+
+# Raised for an absent, malformed, or unresolved identity claim alike, with one message for
+# all three. Distinguishing them would let a caller probe the session boundary to learn which
+# employee identifiers are real, which is the oracle CrossEmployeeAccessError already avoids.
+class SessionAuthenticationError(AegisDeskError):
+    pass

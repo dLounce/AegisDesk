@@ -1,0 +1,252 @@
+[
+  {
+    "employee_id": "E1001",
+    "resource_id": "wiki",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1001",
+    "resource_id": "jira",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1001",
+    "resource_id": "vpn",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E1001",
+    "resource_id": "slack",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1002",
+    "resource_id": "wiki",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1002",
+    "resource_id": "jira",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1002",
+    "resource_id": "vpn",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E1002",
+    "resource_id": "slack",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1042",
+    "resource_id": "wiki",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E1042",
+    "resource_id": "jira",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1042",
+    "resource_id": "vpn",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E1042",
+    "resource_id": "slack",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1043",
+    "resource_id": "wiki",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E1043",
+    "resource_id": "jira",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1043",
+    "resource_id": "vpn",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E1043",
+    "resource_id": "slack",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1055",
+    "resource_id": "wiki",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1055",
+    "resource_id": "jira",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1055",
+    "resource_id": "vpn",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E1055",
+    "resource_id": "slack",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E1056",
+    "resource_id": "wiki",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E1056",
+    "resource_id": "jira",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E1056",
+    "resource_id": "vpn",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E1056",
+    "resource_id": "slack",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E2010",
+    "resource_id": "wiki",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E2010",
+    "resource_id": "jira",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E2010",
+    "resource_id": "vpn",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E2010",
+    "resource_id": "slack",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E2010",
+    "resource_id": "finance-reports",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E2011",
+    "resource_id": "wiki",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E2011",
+    "resource_id": "jira",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E2011",
+    "resource_id": "vpn",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E2011",
+    "resource_id": "slack",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E2011",
+    "resource_id": "finance-reports",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E3020",
+    "resource_id": "wiki",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E3020",
+    "resource_id": "jira",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E3020",
+    "resource_id": "vpn",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E3020",
+    "resource_id": "slack",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E3020",
+    "resource_id": "hris",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E4030",
+    "resource_id": "wiki",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E4030",
+    "resource_id": "jira",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E4030",
+    "resource_id": "vpn",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E4030",
+    "resource_id": "slack",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E4030",
+    "resource_id": "sales-crm",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E5040",
+    "resource_id": "wiki",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E5040",
+    "resource_id": "jira",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E5040",
+    "resource_id": "vpn",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E5040",
+    "resource_id": "slack",
+    "permission": "write"
+  },
+  {
+    "employee_id": "E9099",
+    "resource_id": "wiki",
+    "permission": "read"
+  },
+  {
+    "employee_id": "E9099",
+    "resource_id": "vpn",
+    "permission": "read"
+  }
+]

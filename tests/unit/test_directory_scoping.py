@@ -1,7 +1,7 @@
 import pytest
 
 from aegisdesk.backends.directory import DirectoryBackend
-from aegisdesk.backends.seed import load_employees
+from aegisdesk.backends.seed import load_baseline_access, load_employees
 from aegisdesk.domain.enums import Department
 from aegisdesk.domain.errors import CrossEmployeeAccessError, UnknownEmployeeError
 from aegisdesk.domain.ids import EmployeeId
@@ -13,7 +13,7 @@ ABSENT = EmployeeId("E0000")
 
 @pytest.fixture
 def directory() -> DirectoryBackend:
-    return DirectoryBackend(load_employees())
+    return DirectoryBackend(load_employees(), load_baseline_access())
 
 
 def test_employee_can_read_their_own_record(directory: DirectoryBackend) -> None:
@@ -73,6 +73,6 @@ def test_inactive_employees_are_returned_rather_than_hidden(directory: Directory
 
 def test_backend_is_isolated_from_the_mapping_it_was_given() -> None:
     employees = dict(load_employees())
-    directory = DirectoryBackend(employees)
+    directory = DirectoryBackend(employees, load_baseline_access())
     employees.clear()
     assert directory.get_employee(SELF, SELF).employee_id == SELF

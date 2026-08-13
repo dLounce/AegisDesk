@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from aegisdesk.backends.catalog import ResourceCatalog
 from aegisdesk.backends.directory import DirectoryBackend
-from aegisdesk.backends.seed import load_employees, load_resources
+from aegisdesk.backends.seed import load_baseline_access, load_employees, load_resources
 from aegisdesk.domain.employee import Employee
 from aegisdesk.domain.enums import (
     PERMISSION_RANK,
@@ -540,7 +540,7 @@ def test_an_unresolved_resource_never_allows() -> None:
 def test_the_specification_worked_example() -> None:
     # project.md 9.1: engineer + prod-db + admin + permanent -> human approval. No baseline is
     # supplied, because the privileged rule decides the case before baseline is consulted.
-    directory = DirectoryBackend(load_employees())
+    directory = DirectoryBackend(load_employees(), load_baseline_access())
     catalog = ResourceCatalog(load_resources())
     engineer = directory.get_employee(EmployeeId("E1042"), EmployeeId("E1042"))
 
@@ -563,7 +563,7 @@ def test_the_specification_worked_example() -> None:
 
 
 def test_a_seeded_deactivated_account_is_denied() -> None:
-    directory = DirectoryBackend(load_employees())
+    directory = DirectoryBackend(load_employees(), load_baseline_access())
     catalog = ResourceCatalog(load_resources())
     former = directory.get_employee(EmployeeId("E9099"), EmployeeId("E9099"))
 

@@ -51,7 +51,9 @@ is immutable for the run, and has no path from message text. Cross-employee acti
 merely denied; the protected tool's argument schema has no field in which another
 employee could be named.
 
-*Status: planned.*
+*Status: partially implemented.* The typed session record and the boundary that produces it
+are in place; the runtime context that carries them through a workflow, and the protected
+tool whose schema omits an employee field, are not built yet.
 
 ### AD-3 — Approval binds to a digest of the exact arguments
 
@@ -101,6 +103,38 @@ trajectory logging visible in the codebase, which the evaluation work depends on
 avoids a deprecated framework entry point and the dependency it would pull in.
 
 *Status: planned.*
+
+### AD-27 — Baseline access is directory state, not session state and not engine logic
+
+Baseline access is keyed by employee *and* resource, so a session record cannot hold it: a
+session is established before any resource is named. Deriving it from role or department
+would put a company policy value into code, which the policy engine already declines to do.
+It is therefore stored as an explicit grant per employee and resource, read back through the
+directory under the same self-scoping as any other employee record, and handed to the policy
+engine as a trusted input. Absence is reported rather than defaulted, and policy treats
+absence as no automatic access, so an unrecorded pair escalates instead of resolving.
+
+*Status: implemented.*
+
+### AD-28 — Risk tier arrives from a trusted producer, and the session is not it
+
+The tier is a property of a proposed action, not of the person asking, so it does not belong
+on a session record. Classification is a Router responsibility and the Router is a model, so
+the tier reaching a decision has to be bound by the runtime guard rather than accepted from
+agent output. No governing document states a mapping from anything to a tier, so none is
+written here; the engine continues to record the tier without consulting it.
+
+*Status: not started.* The producer lands with the runtime guard.
+
+### AD-29 — Session context is re-supplied on resume and compared by value
+
+The session record is not a field on workflow state and is not read back from a checkpoint as
+authoritative. The API layer supplies it on the first invocation and again on each resume,
+and the resuming pass compares the value it was handed to the value the run started with. It
+is frozen and closed to unknown fields so that comparison means what it appears to mean.
+
+*Status: partially implemented.* The record and its comparison semantics exist; the
+enforcement point lands with the workflow.
 
 ## 4. Pause and resume semantics
 
