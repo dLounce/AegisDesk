@@ -2,13 +2,20 @@ import json
 from collections.abc import Mapping, Sequence
 from importlib import resources
 from importlib.abc import Traversable
+from itertools import product
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
 from aegisdesk.backends.kb import KbDocument
 from aegisdesk.domain.employee import Employee
-from aegisdesk.domain.enums import Permission
+from aegisdesk.domain.enums import (
+    AccessDuration,
+    Permission,
+    ResourceClass,
+    RiskTier,
+    RiskTierConfiguration,
+)
 from aegisdesk.domain.errors import DomainInvariantError
 from aegisdesk.domain.ids import EmployeeId, ResourceId
 from aegisdesk.domain.resource import Resource
@@ -96,6 +103,42 @@ def load_baseline_access() -> Mapping[tuple[EmployeeId, ResourceId], Permission]
             f"seed baseline access references unknown pairs: {sorted(dangling)}"
         )
     return baseline
+
+
+# Risk tiers are reference configuration for the fictional company, not a rule derived from
+# the specification. project.md 9 requires the policy to define tiers and 9.1 requires the tier
+# on the decision, but no section states a mapping, so the corpus states one triple at a time
+# and no layer of the system computes a tier. The engine still records the tier without
+# consulting it; what this corpus fixes is that the value reaching it is configuration rather
+# than something a model chose.
+class _RiskTierRow(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    resource_class: ResourceClass
+    permission: Permission
+    duration: AccessDuration
+    risk_tier: RiskTier
+
+
+def load_risk_tiers() -> RiskTierConfiguration:
+    rows = _read_json("risk_tiers.json")
+    parsed = [_RiskTierRow.model_validate(row) for row in rows]
+    tiers = {(row.resource_class, row.permission, row.duration): row.risk_tier for row in parsed}
+    if len(tiers) != len(parsed):
+        raise DomainInvariantError("duplicate risk tier key in seed data")
+
+    # An absent triple would leave the guard with no tier for a request it can otherwise
+    # resolve. The guard refuses in that case, so an incomplete corpus turns into a refusal of
+    # real work rather than a wrong tier; catching it here makes the gap visible at start-up.
+    every_triple = product(ResourceClass, Permission, AccessDuration)
+    missing = [
+        f"{resource_class.value}/{permission.value}/{duration.value}"
+        for resource_class, permission, duration in every_triple
+        if (resource_class, permission, duration) not in tiers
+    ]
+    if missing:
+        raise DomainInvariantError(f"risk tier corpus does not cover: {sorted(missing)}")
+    return tiers
 
 
 def load_kb_documents() -> Sequence[KbDocument]:

@@ -35,3 +35,19 @@ class AccessGrant(BaseModel):
         if self.expires_at is not None and self.expires_at <= self.granted_at:
             raise DomainInvariantError("expires_at must be later than granted_at")
         return self
+
+
+# What the access backend executes. The backend has no signature taking loose identifiers, so a
+# grant to an employee nobody authorised cannot be spelled. This class is importable and a
+# caller can therefore construct one, which is why constructing it is not what authorises
+# anything: the backend also requires the minting key it issued to its single minting
+# authority, and the guard claims that at construction.
+class ExecutionReceipt(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    action_id: ActionId
+    requester_id: EmployeeId
+    resource_id: ResourceId
+    permission: Permission
+    duration: AccessDuration
+    authorised_at: AwareDatetime

@@ -40,3 +40,10 @@ class IllegalTicketTransitionError(AegisDeskError):
 # employee identifiers are real, which is the oracle CrossEmployeeAccessError already avoids.
 class SessionAuthenticationError(AegisDeskError):
     pass
+
+
+# Raised when the access backend is called with anything other than a receipt the guard
+# produced. The backend has no other entry point, so this is what a caller that skipped the
+# authorization path meets.
+class ProtectedExecutionError(AegisDeskError):
+    pass

@@ -1,0 +1,164 @@
+[
+  {
+    "resource_class": "baseline",
+    "permission": "read",
+    "duration": "one_hour",
+    "risk_tier": "low"
+  },
+  {
+    "resource_class": "baseline",
+    "permission": "read",
+    "duration": "eight_hours",
+    "risk_tier": "low"
+  },
+  {
+    "resource_class": "baseline",
+    "permission": "read",
+    "duration": "permanent",
+    "risk_tier": "low"
+  },
+  {
+    "resource_class": "baseline",
+    "permission": "write",
+    "duration": "one_hour",
+    "risk_tier": "low"
+  },
+  {
+    "resource_class": "baseline",
+    "permission": "write",
+    "duration": "eight_hours",
+    "risk_tier": "low"
+  },
+  {
+    "resource_class": "baseline",
+    "permission": "write",
+    "duration": "permanent",
+    "risk_tier": "medium"
+  },
+  {
+    "resource_class": "baseline",
+    "permission": "admin",
+    "duration": "one_hour",
+    "risk_tier": "medium"
+  },
+  {
+    "resource_class": "baseline",
+    "permission": "admin",
+    "duration": "eight_hours",
+    "risk_tier": "medium"
+  },
+  {
+    "resource_class": "baseline",
+    "permission": "admin",
+    "duration": "permanent",
+    "risk_tier": "high"
+  },
+  {
+    "resource_class": "sensitive",
+    "permission": "read",
+    "duration": "one_hour",
+    "risk_tier": "medium"
+  },
+  {
+    "resource_class": "sensitive",
+    "permission": "read",
+    "duration": "eight_hours",
+    "risk_tier": "medium"
+  },
+  {
+    "resource_class": "sensitive",
+    "permission": "read",
+    "duration": "permanent",
+    "risk_tier": "medium"
+  },
+  {
+    "resource_class": "sensitive",
+    "permission": "write",
+    "duration": "one_hour",
+    "risk_tier": "medium"
+  },
+  {
+    "resource_class": "sensitive",
+    "permission": "write",
+    "duration": "eight_hours",
+    "risk_tier": "medium"
+  },
+  {
+    "resource_class": "sensitive",
+    "permission": "write",
+    "duration": "permanent",
+    "risk_tier": "high"
+  },
+  {
+    "resource_class": "sensitive",
+    "permission": "admin",
+    "duration": "one_hour",
+    "risk_tier": "high"
+  },
+  {
+    "resource_class": "sensitive",
+    "permission": "admin",
+    "duration": "eight_hours",
+    "risk_tier": "high"
+  },
+  {
+    "resource_class": "sensitive",
+    "permission": "admin",
+    "duration": "permanent",
+    "risk_tier": "high"
+  },
+  {
+    "resource_class": "privileged",
+    "permission": "read",
+    "duration": "one_hour",
+    "risk_tier": "high"
+  },
+  {
+    "resource_class": "privileged",
+    "permission": "read",
+    "duration": "eight_hours",
+    "risk_tier": "high"
+  },
+  {
+    "resource_class": "privileged",
+    "permission": "read",
+    "duration": "permanent",
+    "risk_tier": "high"
+  },
+  {
+    "resource_class": "privileged",
+    "permission": "write",
+    "duration": "one_hour",
+    "risk_tier": "high"
+  },
+  {
+    "resource_class": "privileged",
+    "permission": "write",
+    "duration": "eight_hours",
+    "risk_tier": "high"
+  },
+  {
+    "resource_class": "privileged",
+    "permission": "write",
+    "duration": "permanent",
+    "risk_tier": "critical"
+  },
+  {
+    "resource_class": "privileged",
+    "permission": "admin",
+    "duration": "one_hour",
+    "risk_tier": "high"
+  },
+  {
+    "resource_class": "privileged",
+    "permission": "admin",
+    "duration": "eight_hours",
+    "risk_tier": "critical"
+  },
+  {
+    "resource_class": "privileged",
+    "permission": "admin",
+    "duration": "permanent",
+    "risk_tier": "critical"
+  }
+]

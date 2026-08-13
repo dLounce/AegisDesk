@@ -147,3 +147,29 @@ class ActorType(Enum):
     AGENT = "agent"
     RUNTIME = "runtime"
     BACKEND = "backend"
+
+
+# What the runtime guard did. Two members, so no caller can read a refusal as a qualified
+# success. REFUSED is first, so code reaching for a positional default lands on the refusal.
+class GuardOutcome(Enum):
+    REFUSED = "refused"
+    EXECUTED = "executed"
+
+
+# Why the guard refused. This travels on the outcome record for the audit trail and never
+# reaches the model, which sees one message whatever the reason.
+class GuardRefusalReason(Enum):
+    UNTRUSTED_SESSION = "untrusted_session"
+    MALFORMED_PROPOSAL = "malformed_proposal"
+    MISSING_CAPABILITY = "missing_capability"
+    UNRESOLVED_REQUESTER = "unresolved_requester"
+    UNRESOLVED_TICKET = "unresolved_ticket"
+    UNRESOLVED_RESOURCE = "unresolved_resource"
+    UNCLASSIFIED_RISK = "unclassified_risk"
+    POLICY_REFUSED = "policy_refused"
+
+
+# The risk tier in force for a resolved request, supplied as configuration. project.md 9
+# requires the policy to define tiers and 9.1 requires the tier on a decision, but no section
+# states a mapping, so the shape is declared here and the values live in seed configuration.
+RiskTierConfiguration = Mapping[tuple[ResourceClass, Permission, AccessDuration], RiskTier]
