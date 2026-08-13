@@ -1,3 +1,4 @@
+import contextlib
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Final, Self
@@ -16,8 +17,10 @@ from aegisdesk.approval import (
     effective_status,
     recorded_decision_tuple,
 )
+from aegisdesk.audit import AuditEvent
 from aegisdesk.backends.access import AccessBackend
 from aegisdesk.backends.approvals import ApprovalStore
+from aegisdesk.backends.audit import AuditSink
 from aegisdesk.backends.catalog import ResourceCatalog
 from aegisdesk.backends.directory import DirectoryBackend
 from aegisdesk.backends.tickets import TicketStore
@@ -25,8 +28,10 @@ from aegisdesk.capabilities import REQUIRED_CAPABILITY, holds
 from aegisdesk.domain.access import AccessGrant, ExecutionReceipt
 from aegisdesk.domain.employee import Employee
 from aegisdesk.domain.enums import (
+    ActorType,
     AgentName,
     ApprovalStatus,
+    AuditEventType,
     GuardOutcome,
     GuardRefusalReason,
     Permission,
@@ -178,6 +183,7 @@ class RuntimeGuard:
         risk_tiers: RiskTierConfiguration,
         access: AccessBackend,
         approvals: ApprovalStore,
+        audit: AuditSink,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._directory = directory
@@ -186,6 +192,7 @@ class RuntimeGuard:
         self._risk_tiers = dict(risk_tiers)
         self._access = access
         self._approvals = approvals
+        self._audit = audit
         # Injected rather than read from the system clock at each use, and owned here rather
         # than taken per call: approval freshness and grant windows are decided against it, and
         # a caller that supplied the instant could backdate an expiry check or choose the window
@@ -203,6 +210,18 @@ class RuntimeGuard:
         action: ProposedAction,
     ) -> ProposalOutcome:
         now = self._clock()
+        outcome = self._propose(agent, session, workflow_id, action, now)
+        self._emit(outcome, workflow_id, now)
+        return outcome
+
+    def _propose(
+        self,
+        agent: AgentName,
+        session: EmployeeSessionContext,
+        workflow_id: WorkflowId,
+        action: ProposedAction,
+        now: datetime,
+    ) -> ProposalOutcome:
         try:
             resolved, action_id, digest, decision = self._resolve(
                 agent, session, workflow_id, action, now
@@ -250,6 +269,18 @@ class RuntimeGuard:
         action: ProposedAction,
     ) -> ProposalOutcome:
         now = self._clock()
+        outcome = self._execute_approved(agent, session, workflow_id, action, now)
+        self._emit(outcome, workflow_id, now)
+        return outcome
+
+    def _execute_approved(
+        self,
+        agent: AgentName,
+        session: EmployeeSessionContext,
+        workflow_id: WorkflowId,
+        action: ProposedAction,
+        now: datetime,
+    ) -> ProposalOutcome:
         try:
             resolved, action_id, digest, decision = self._resolve(
                 agent, session, workflow_id, action, now
@@ -365,6 +396,55 @@ class RuntimeGuard:
             authorised_at=None,
         )
 
+    # Records the trajectory of a completed pass. The executed event is not written here: it is
+    # written inside _execute before the grant, where it is fail-closed. Everything recorded here
+    # is a non-executing outcome, so a failed write leaves the outcome untouched rather than
+    # converting a refusal or a pause into a raised exception. A pending outcome yields two
+    # entries — the proposal was persisted and the action is now waiting — and both are keyed, so
+    # a replayed pre-pause pass records neither a second time.
+    def _emit(self, outcome: ProposalOutcome, workflow_id: WorkflowId, now: datetime) -> None:
+        if outcome.outcome is GuardOutcome.EXECUTED:
+            return
+        with contextlib.suppress(Exception):
+            if outcome.outcome is GuardOutcome.AWAITING_APPROVAL:
+                self._audit.record(
+                    AuditEvent.build(
+                        event_type=AuditEventType.PROPOSAL_PERSISTED,
+                        occurred_at=now,
+                        actor_type=ActorType.RUNTIME,
+                        workflow_id=workflow_id,
+                        action_id=outcome.action_id,
+                        decision=outcome.decision,
+                    )
+                )
+                self._audit.record(
+                    AuditEvent.build(
+                        event_type=AuditEventType.AWAITING_APPROVAL,
+                        occurred_at=now,
+                        actor_type=ActorType.RUNTIME,
+                        workflow_id=workflow_id,
+                        action_id=outcome.action_id,
+                        outcome=GuardOutcome.AWAITING_APPROVAL,
+                        decision=outcome.decision,
+                    )
+                )
+                return
+            reason = None if outcome.refusal_reason is None else outcome.refusal_reason.value
+            self._audit.record(
+                AuditEvent.build(
+                    event_type=AuditEventType.REFUSED,
+                    occurred_at=now,
+                    actor_type=ActorType.RUNTIME,
+                    workflow_id=workflow_id,
+                    # None for a refusal reached before resolution; that entry is uncorrelated and
+                    # recorded on every genuine attempt rather than deduplicated.
+                    action_id=outcome.action_id,
+                    outcome=GuardOutcome.REFUSED,
+                    refusal_reason=reason,
+                    decision=outcome.decision,
+                )
+            )
+
     # The five checks a resume runs against the authoritative record. Each fails closed, and
     # the fourth fails closed even when the re-evaluated decision would now permit the action
     # outright: a changed world is a world the reviewer did not authorise.
@@ -395,6 +475,11 @@ class RuntimeGuard:
             raise _Refused(GuardRefusalReason.REVIEWER_NOT_ELIGIBLE)
         return record
 
+    # The executed event is written here, before the grant is minted, so it is fail-closed: if
+    # the recording boundary raises, the exception propagates and no grant is issued. The write
+    # is idempotent under the action identifier, so a replayed resume records one executed event
+    # rather than two. Every other event the guard records is a non-executing outcome written
+    # best-effort in _emit; only this one gates the grant.
     def _execute(
         self,
         resolved: ResolvedAction,
@@ -415,6 +500,7 @@ class RuntimeGuard:
                 GuardRefusalReason.EXPIRED_GRANT_REPLAY, resolved, action_id, digest, decision
             )
 
+        self._record_executed(resolved, action_id, decision, now)
         grant = self._access.grant(
             ExecutionReceipt(
                 action_id=action_id,
@@ -436,6 +522,21 @@ class RuntimeGuard:
             approval_id=approval_id,
             grant=grant,
             authorised_at=now,
+        )
+
+    def _record_executed(
+        self, resolved: ResolvedAction, action_id: ActionId, decision: PolicyDecision, now: datetime
+    ) -> None:
+        self._audit.record(
+            AuditEvent.build(
+                event_type=AuditEventType.EXECUTED,
+                occurred_at=now,
+                actor_type=ActorType.RUNTIME,
+                workflow_id=resolved.workflow_id,
+                action_id=action_id,
+                outcome=GuardOutcome.EXECUTED,
+                decision=decision,
+            )
         )
 
     def _requester(self, session: EmployeeSessionContext) -> Employee:

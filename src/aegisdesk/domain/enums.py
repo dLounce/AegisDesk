@@ -185,6 +185,19 @@ class GuardRefusalReason(Enum):
     EXPIRED_GRANT_REPLAY = "expired_grant_replay"
 
 
+# What an append-only audit entry records. The trajectory events a protected action passes
+# through — persisted, paused, executed, refused — plus the two security-relevant events that
+# happen off that path: a reviewer's decision and a cross-employee ticket attempt the backend
+# collapses into an indistinguishable error for the caller but records server-side.
+class AuditEventType(Enum):
+    PROPOSAL_PERSISTED = "proposal_persisted"
+    AWAITING_APPROVAL = "awaiting_approval"
+    EXECUTED = "executed"
+    REFUSED = "refused"
+    REVIEWER_DECISION = "reviewer_decision"
+    CROSS_EMPLOYEE_TICKET_ATTEMPT = "cross_employee_ticket_attempt"
+
+
 # Why the approval store refused a reviewer decision. Kept off the exception message for the
 # same reason the guard keeps its refusal reason off the model's reply: a caller comparing
 # messages could otherwise learn which approvals exist and which reviewers are on the roster.

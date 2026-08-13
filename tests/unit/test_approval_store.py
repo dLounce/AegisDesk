@@ -6,13 +6,17 @@ import pytest
 
 from aegisdesk.action import ResolvedAction, compute_argument_digest, derive_action_id
 from aegisdesk.approval import ApprovalDecision, ApprovalPolicy
+from aegisdesk.audit import AuditEvent
 from aegisdesk.backends.approvals import InMemoryApprovalStore
+from aegisdesk.backends.audit import InMemoryAuditSink
 from aegisdesk.backends.directory import DirectoryBackend
 from aegisdesk.backends.seed import load_baseline_access, load_employees
 from aegisdesk.domain.enums import (
     AccessDuration,
+    ActorType,
     ApprovalRefusalReason,
     ApprovalStatus,
+    AuditEventType,
     Permission,
     PolicyEffect,
     PolicyReason,
@@ -93,10 +97,11 @@ class MutableRosterStore(InMemoryApprovalStore):
         directory: DirectoryBackend,
         reviewers: frozenset[ReviewerId],
         policy: ApprovalPolicy,
+        audit: InMemoryAuditSink,
         clock: Clock,
         max_pending_per_workflow: int = 5,
     ) -> None:
-        super().__init__(directory, reviewers, policy, clock, max_pending_per_workflow)
+        super().__init__(directory, reviewers, policy, audit, clock, max_pending_per_workflow)
         self.roster = set(reviewers)
 
     def _require_rostered(self, reviewer_id: ReviewerId) -> None:
@@ -107,11 +112,13 @@ class MutableRosterStore(InMemoryApprovalStore):
 class Fixture:
     def __init__(self, max_pending: int = 5) -> None:
         self.clock = Clock(AT)
+        self.audit = InMemoryAuditSink()
         self.directory = DirectoryBackend(load_employees(), load_baseline_access())
         self.store = MutableRosterStore(
             self.directory,
             frozenset({REVIEWER, INACTIVE}),
             POLICY,
+            self.audit,
             self.clock,
             max_pending,
         )
@@ -339,7 +346,7 @@ def test_self_approval_is_refused_when_two_spellings_resolve_to_one_person() -> 
     fixture = Fixture()
     fixture.directory = DirectoryBackend(employees, load_baseline_access())
     fixture.store = MutableRosterStore(
-        fixture.directory, frozenset({ReviewerId("e1042")}), POLICY, fixture.clock
+        fixture.directory, frozenset({ReviewerId("e1042")}), POLICY, fixture.audit, fixture.clock
     )
     record = fixture.open()
     session = ReviewerSessionContext(reviewer_id=ReviewerId("e1042"), authenticated_at=AT)
@@ -468,3 +475,51 @@ def test_every_decision_refusal_carries_the_same_message(fixture: Fixture) -> No
 def test_the_recorded_policy_version_is_the_one_in_force(fixture: Fixture) -> None:
     record = fixture.open()
     assert record.policy_version == PolicyVersion(POLICY_VERSION)
+
+
+# --- reviewer decisions on the audit trail ---------------------------------------------------
+
+
+def _decisions(fixture: Fixture) -> list[AuditEvent]:
+    return [
+        event
+        for event in fixture.audit.events()
+        if event.event_type is AuditEventType.REVIEWER_DECISION
+    ]
+
+
+@pytest.mark.parametrize(
+    ("decision", "status"),
+    [
+        (ApprovalDecision.APPROVE, ApprovalStatus.APPROVED),
+        (ApprovalDecision.REJECT, ApprovalStatus.REJECTED),
+    ],
+)
+def test_a_reviewer_decision_is_recorded(
+    fixture: Fixture, decision: ApprovalDecision, status: ApprovalStatus
+) -> None:
+    record = fixture.open()
+    fixture.decide(fixture.reviewer, record.approval_id, decision)
+    events = _decisions(fixture)
+    assert len(events) == 1
+    recorded = events[0]
+    assert recorded.actor_type is ActorType.REVIEWER
+    assert recorded.actor_id == REVIEWER
+    assert recorded.workflow_id == record.workflow_id
+    assert recorded.action_id == record.action_id
+    assert recorded.detail == status.value
+
+
+def test_a_refused_decision_records_nothing(fixture: Fixture) -> None:
+    # An off-roster reviewer is refused before any transition, so the trail carries no decision.
+    record = fixture.open()
+    stranger = ReviewerSessionContext(reviewer_id=ReviewerId("E9099"), authenticated_at=AT)
+    with pytest.raises(ApprovalDecisionError):
+        fixture.decide(stranger, record.approval_id, ApprovalDecision.APPROVE)
+    assert _decisions(fixture) == []
+
+
+def test_opening_a_record_writes_no_reviewer_decision(fixture: Fixture) -> None:
+    # A pending record is not a decision. Nothing reaches the trail until a reviewer decides.
+    fixture.open()
+    assert _decisions(fixture) == []

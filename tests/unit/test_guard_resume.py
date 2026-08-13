@@ -7,6 +7,7 @@ from aegisdesk.action import ProposedAction, ResolvedAction, derive_action_id
 from aegisdesk.approval import ApprovalDecision, ApprovalPolicy
 from aegisdesk.backends.access import AccessBackend
 from aegisdesk.backends.approvals import InMemoryApprovalStore
+from aegisdesk.backends.audit import InMemoryAuditSink
 from aegisdesk.backends.catalog import ResourceCatalog
 from aegisdesk.backends.directory import DirectoryBackend
 from aegisdesk.backends.seed import (
@@ -22,6 +23,7 @@ from aegisdesk.domain.enums import (
     ActorType,
     AgentName,
     ApprovalStatus,
+    AuditEventType,
     GuardOutcome,
     GuardRefusalReason,
     Permission,
@@ -93,8 +95,8 @@ class RecordingAccess(AccessBackend):
 
 
 class MutableRosterStore(InMemoryApprovalStore):
-    def __init__(self, directory: DirectoryBackend, clock: Clock) -> None:
-        super().__init__(directory, frozenset({REVIEWER}), POLICY, clock)
+    def __init__(self, directory: DirectoryBackend, audit: InMemoryAuditSink, clock: Clock) -> None:
+        super().__init__(directory, frozenset({REVIEWER}), POLICY, audit, clock)
         self.roster = {REVIEWER}
 
     def _require_rostered(self, reviewer_id: ReviewerId) -> None:
@@ -105,14 +107,22 @@ class MutableRosterStore(InMemoryApprovalStore):
             raise ApprovalDecisionError(ApprovalRefusalReason.REVIEWER_NOT_ON_ROSTER)
 
 
+class RaisingAuditSink(InMemoryAuditSink):
+    """A recording boundary that is down: every write raises."""
+
+    def record(self, event: Any) -> Any:
+        raise RuntimeError("audit sink is down")
+
+
 class Fixture:
-    def __init__(self) -> None:
+    def __init__(self, audit: Any = None) -> None:
         self.clock = Clock(AT)
+        self.audit = InMemoryAuditSink() if audit is None else audit
         self.directory = WideningDirectory(load_employees(), load_baseline_access())
         self.catalog = ResourceCatalog(load_resources())
-        self.tickets = InMemoryTicketStore(clock=lambda: AT)
+        self.tickets = InMemoryTicketStore(self.audit, clock=lambda: AT)
         self.access = RecordingAccess()
-        self.approvals = MutableRosterStore(self.directory, self.clock)
+        self.approvals = MutableRosterStore(self.directory, self.audit, self.clock)
         self.guard = RuntimeGuard(
             self.directory,
             self.catalog,
@@ -120,6 +130,7 @@ class Fixture:
             load_risk_tiers(),
             self.access,
             self.approvals,
+            self.audit,
             self.clock,
         )
         self.own_ticket = self.tickets.create(EmployeeId(SELF), "access request").ticket_id
@@ -756,3 +767,63 @@ def test_every_refusal_on_the_resume_path_writes_nothing(fixture: Fixture) -> No
     assert all(outcome.grant is None for outcome in refusals)
     assert all(outcome.approval_id is None for outcome in refusals)
     assert fixture.access.writes == 0
+
+
+# --- audit trail (resume side) ---------------------------------------------------------------
+
+
+def test_the_whole_approval_trajectory_is_recorded_in_order(fixture: Fixture) -> None:
+    pending = fixture.propose()
+    assert pending.approval_id is not None
+    fixture.approve(pending.approval_id)
+    executed = fixture.resume()
+    assert executed.outcome is GuardOutcome.EXECUTED
+    assert [event.event_type for event in fixture.audit.events()] == [
+        AuditEventType.PROPOSAL_PERSISTED,
+        AuditEventType.AWAITING_APPROVAL,
+        AuditEventType.REVIEWER_DECISION,
+        AuditEventType.EXECUTED,
+    ]
+
+
+def test_a_reviewer_decision_names_the_reviewer_and_its_action(fixture: Fixture) -> None:
+    pending = fixture.propose()
+    assert pending.approval_id is not None
+    fixture.approve(pending.approval_id)
+    decision_events = [
+        event
+        for event in fixture.audit.events()
+        if event.event_type is AuditEventType.REVIEWER_DECISION
+    ]
+    assert len(decision_events) == 1
+    recorded = decision_events[0]
+    assert recorded.actor_type is ActorType.REVIEWER
+    assert recorded.actor_id == REVIEWER
+    assert recorded.action_id == pending.action_id
+    assert recorded.detail == ApprovalStatus.APPROVED.value
+
+
+def test_a_repeated_resume_records_one_executed_event(fixture: Fixture) -> None:
+    pending = fixture.propose()
+    assert pending.approval_id is not None
+    fixture.approve(pending.approval_id)
+    fixture.resume()
+    fixture.resume()
+    executed = [
+        event for event in fixture.audit.events() if event.event_type is AuditEventType.EXECUTED
+    ]
+    assert len(executed) == 1
+
+
+def test_a_resume_is_fail_closed_on_the_recording_boundary() -> None:
+    # With the sink down, the pending and reviewer-decision writes are best-effort and pass
+    # through; the resume's executed write precedes the grant, so it raises and no grant is
+    # minted. The approval itself still stands — the decision is durable in the record.
+    fixture = Fixture(audit=RaisingAuditSink())
+    pending = fixture.propose()
+    assert pending.approval_id is not None
+    assert fixture.approve(pending.approval_id).status is ApprovalStatus.APPROVED
+    with pytest.raises(RuntimeError):
+        fixture.resume()
+    assert fixture.access.writes == 0
+    assert fixture.access.grant_for(pending.action_id) is None

@@ -83,10 +83,13 @@ A direct consequence of AD-4. Proposal persistence and the corresponding audit w
 idempotent upserts, so a second pass over the same code is a no-op rather than a
 duplicate.
 
-*Status: partially implemented.* Proposal persistence now exists and is insert-if-absent under
-the workflow and action identifiers, so repeating the pre-pause pass produces one record with one
-creation time and does not reset a decision. The audit write does not exist yet, so the
-idempotency it will require is still a stated rule rather than shipped behaviour.
+*Status: implemented.* Proposal persistence is insert-if-absent under the workflow and action
+identifiers, so repeating the pre-pause pass produces one record with one creation time and does
+not reset a decision. The audit write now exists with the same property: `InMemoryAuditSink` is
+insert-if-absent under `(workflow_id, action_id, event_type)`, so a correlated event replayed on
+resume records one entry rather than a duplicate. A pre-resolution refusal has no action identity
+and is therefore uncorrelated and recorded on every genuine attempt, which is the intended
+behaviour rather than a gap: a repeated refusal is a distinct line, not a replay of one.
 
 ### AD-6 — Agents may propose privileged actions; they may not execute them
 
@@ -400,6 +403,34 @@ enforcement is a later concern and is not claimed here.
 
 *Status: implemented.*
 
+### AD-45 — The audit trail records authoritative state, escaped at the log boundary
+
+The trail records the trajectory of a protected action — persisted, awaiting a human, executed,
+refused — plus the two security-relevant events off that path: a reviewer's decision and a
+cross-employee ticket attempt. Every field on an `AuditEvent` is authoritative runtime state or a
+bounded, escaped descriptor; the whole validated `PolicyDecision` travels on the event, so a line
+is self-describing without a join, and nothing a model wrote reaches the trail as prose. The one
+distinction the model may draw still holds: the refusal reason travels only here, never in the
+sentence the model is handed (AD-35).
+
+Two properties are enforced structurally. The executed write precedes the grant and fails closed,
+so a grant cannot be issued that the trail did not record; every other event is best-effort,
+because none authorises anything and a failed write must not change an already-non-executing
+outcome. And any caller-influenced string — `detail`, `actor_id` — passes `sanitize_log_field` at
+construction, which escapes newlines and control characters and bounds length (ASVS V7.3.1), so a
+message body cannot forge a neighbouring log line. Escaping happens at the log boundary only; the
+stored ticket and KB text are never mutated, in the way the KB is never sanitised in place.
+
+The same `AuditSink` is injected into the guard, the ticket store and the approval store rather
+than placed behind a facade: each component records the events only it can see, and the
+cross-employee attempt in particular is recorded by the store because it is the one place that can
+still tell a cross-employee access from a missing ticket before both collapse into the identical
+caller-facing error.
+
+*Status: implemented.* `InMemoryAuditSink` is the append-only recording boundary. It is not
+durable non-repudiation: the trail lives in process memory and a restart loses it. Durable,
+tamper-evident storage is the §5 persistence concern.
+
 ## 4. Pause and resume semantics
 
 This is the most consequential runtime behaviour in the system and is treated as a hard
@@ -426,9 +457,14 @@ attempt would corrupt the security metrics and make a retry indistinguishable fr
 
 *Status: partially implemented.* The two passes exist as `RuntimeGuard.propose` and
 `RuntimeGuard.execute_approved`, they share their resolution sequence by construction, and the
-proposal write between them is idempotent. What is not built is the workflow that pauses between
-them and the audit write on either side, so the ordering is enforced by the code that exists
-rather than demonstrated across a real checkpoint.
+proposal and audit writes between them are idempotent. The executed event is written before the
+grant is minted and fails closed: if the recording boundary raises, the exception propagates and
+no grant is issued. The proposal, pending, refused, reviewer-decision and cross-employee events
+are recorded best-effort, because none of them authorises anything and a failed write must not
+convert a refusal or a pause into a different outcome. What is still not built is the workflow
+that pauses between the two passes, so the ordering is enforced by the code that exists rather
+than demonstrated across a real checkpoint, and the sink holds the trail in process memory —
+durable, tamper-evident non-repudiation is a §5 persistence concern, not a property claimed here.
 
 ## 5. Durability
 

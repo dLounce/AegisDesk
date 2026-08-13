@@ -8,6 +8,7 @@ from aegisdesk.domain.enums import (
     AgentName,
     ApprovalRefusalReason,
     ApprovalStatus,
+    AuditEventType,
     Capability,
     GuardOutcome,
     GuardRefusalReason,
@@ -139,3 +140,20 @@ def test_a_re_proposal_after_rejection_has_its_own_refusal_reason() -> None:
         )
         == 3
     )
+
+
+def test_audit_event_types_are_not_string_subclasses() -> None:
+    # An audit type read back from a persisted trail or a checkpoint must not compare equal to a
+    # raw string, for the same reason every other enum here is a plain Enum.
+    assert not issubclass(AuditEventType, str)
+
+
+def test_audit_event_types_cover_the_recorded_trajectory() -> None:
+    assert {event.value for event in AuditEventType} == {
+        "proposal_persisted",
+        "awaiting_approval",
+        "executed",
+        "refused",
+        "reviewer_decision",
+        "cross_employee_ticket_attempt",
+    }

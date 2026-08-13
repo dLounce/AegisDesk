@@ -1,8 +1,11 @@
+import contextlib
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Protocol
 
-from aegisdesk.domain.enums import ActorType, TicketStatus
+from aegisdesk.audit import AuditEvent
+from aegisdesk.backends.audit import AuditSink
+from aegisdesk.domain.enums import ActorType, AuditEventType, TicketStatus
 from aegisdesk.domain.errors import (
     CrossEmployeeAccessError,
     IllegalTicketTransitionError,
@@ -44,7 +47,8 @@ def _utc_now() -> datetime:
 
 
 class InMemoryTicketStore(TicketStore):
-    def __init__(self, clock: Callable[[], datetime] = _utc_now) -> None:
+    def __init__(self, audit: AuditSink, clock: Callable[[], datetime] = _utc_now) -> None:
+        self._audit = audit
         self._clock = clock
         self._tickets: dict[TicketId, Ticket] = {}
         self._messages: dict[TicketId, list[TicketMessage]] = {}
@@ -126,8 +130,27 @@ class InMemoryTicketStore(TicketStore):
     def _owned(self, requester_id: EmployeeId, ticket_id: TicketId) -> Ticket:
         ticket = self._tickets.get(ticket_id)
         if ticket is None or ticket.requester_id != requester_id:
+            # A ticket that exists but belongs to someone else is the cross-employee case the
+            # caller-facing error deliberately hides. It is recorded server-side before the same
+            # indistinguishable error is raised, so the distinction lives in the audit trail
+            # without becoming an oracle for the caller.
+            if ticket is not None:
+                self._record_cross_employee_attempt(requester_id, ticket_id)
             raise TicketNotFoundError(f"requester {requester_id} has no ticket with that id")
         return ticket
+
+    # Best-effort: a scoping refusal is a non-executing outcome, so a failure of the recording
+    # boundary must not turn it into a different error and reopen the oracle this method closes.
+    def _record_cross_employee_attempt(self, requester_id: EmployeeId, ticket_id: TicketId) -> None:
+        with contextlib.suppress(Exception):
+            self._audit.record(
+                AuditEvent.build(
+                    event_type=AuditEventType.CROSS_EMPLOYEE_TICKET_ATTEMPT,
+                    occurred_at=self._clock(),
+                    actor_type=ActorType.BACKEND,
+                    detail=f"requester={requester_id} ticket={ticket_id}",
+                )
+            )
 
     # Ticket is frozen, so every change is a replacement. Both mutating paths go through
     # here, which is what keeps updated_at from being maintained on one and forgotten on the

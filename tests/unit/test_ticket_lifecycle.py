@@ -3,8 +3,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
+from aegisdesk.audit import AuditEvent
+from aegisdesk.backends.audit import InMemoryAuditSink
 from aegisdesk.backends.tickets import InMemoryTicketStore
-from aegisdesk.domain.enums import ActorType, TicketStatus
+from aegisdesk.domain.enums import ActorType, AuditEventType, TicketStatus
 from aegisdesk.domain.errors import (
     CrossEmployeeAccessError,
     IllegalTicketTransitionError,
@@ -63,7 +65,7 @@ class FakeClock:
 
 @pytest.fixture
 def store() -> InMemoryTicketStore:
-    return InMemoryTicketStore(clock=FakeClock())
+    return InMemoryTicketStore(InMemoryAuditSink(), clock=FakeClock())
 
 
 def ticket_in(store: InMemoryTicketStore, status: TicketStatus) -> TicketId:
@@ -359,3 +361,78 @@ def test_the_returned_message_sequence_is_not_the_stored_one(store: InMemoryTick
 def test_messages_on_an_unknown_ticket_are_refused(store: InMemoryTicketStore) -> None:
     with pytest.raises(TicketNotFoundError):
         store.messages(OWNER, ABSENT)
+
+
+# --- cross-employee attempts are recorded server-side ----------------------------------
+
+
+@pytest.fixture
+def sink() -> InMemoryAuditSink:
+    return InMemoryAuditSink()
+
+
+@pytest.fixture
+def audited_store(sink: InMemoryAuditSink) -> InMemoryTicketStore:
+    return InMemoryTicketStore(sink, clock=FakeClock())
+
+
+def _attempts(sink: InMemoryAuditSink) -> list[AuditEvent]:
+    return [
+        event
+        for event in sink.events()
+        if event.event_type is AuditEventType.CROSS_EMPLOYEE_TICKET_ATTEMPT
+    ]
+
+
+def test_a_cross_employee_read_is_recorded_but_still_refused(
+    audited_store: InMemoryTicketStore, sink: InMemoryAuditSink
+) -> None:
+    ticket = audited_store.create(OWNER, "vpn will not connect")
+    with pytest.raises(TicketNotFoundError):
+        audited_store.get(INTRUDER, ticket.ticket_id)
+    attempts = _attempts(sink)
+    assert len(attempts) == 1
+    assert attempts[0].actor_type is ActorType.BACKEND
+    assert INTRUDER in (attempts[0].detail or "")
+    assert ticket.ticket_id in (attempts[0].detail or "")
+
+
+def test_a_missing_ticket_records_no_attempt(
+    audited_store: InMemoryTicketStore, sink: InMemoryAuditSink
+) -> None:
+    # The not-found branch and the cross-employee branch raise the identical error, but only the
+    # second is a real access attempt on a real ticket. Recording the first would both be noise
+    # and leak, over time, which ids are real.
+    with pytest.raises(TicketNotFoundError):
+        audited_store.get(INTRUDER, ABSENT)
+    assert _attempts(sink) == []
+
+
+def test_recording_a_cross_employee_attempt_does_not_change_the_error(
+    audited_store: InMemoryTicketStore,
+) -> None:
+    # The caller-facing behaviour is unchanged: both failures raise the same message, so the
+    # server-side record does not become an oracle the caller can read.
+    ticket = audited_store.create(OWNER, "vpn will not connect")
+    with pytest.raises(TicketNotFoundError) as existing:
+        audited_store.get(INTRUDER, ticket.ticket_id)
+    with pytest.raises(TicketNotFoundError) as missing:
+        audited_store.get(INTRUDER, ABSENT)
+    assert str(existing.value) == str(missing.value)
+
+
+def test_every_scoped_operation_records_the_cross_employee_attempt(
+    audited_store: InMemoryTicketStore, sink: InMemoryAuditSink
+) -> None:
+    ticket = audited_store.create(OWNER, "vpn will not connect")
+    with pytest.raises(TicketNotFoundError):
+        audited_store.get(INTRUDER, ticket.ticket_id)
+    with pytest.raises(TicketNotFoundError):
+        audited_store.messages(INTRUDER, ticket.ticket_id)
+    with pytest.raises(TicketNotFoundError):
+        audited_store.append_message(
+            INTRUDER, ticket.ticket_id, ActorType.EMPLOYEE, INTRUDER, "let me in"
+        )
+    with pytest.raises(TicketNotFoundError):
+        audited_store.set_status(INTRUDER, ticket.ticket_id, TicketStatus.RESOLVED)
+    assert len(_attempts(sink)) == 4

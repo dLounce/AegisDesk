@@ -1,3 +1,4 @@
+import contextlib
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Final, Protocol
@@ -10,8 +11,10 @@ from aegisdesk.approval import (
     ApprovalRecord,
     effective_status,
 )
+from aegisdesk.audit import AuditEvent
+from aegisdesk.backends.audit import AuditSink
 from aegisdesk.backends.directory import DirectoryBackend
-from aegisdesk.domain.enums import ApprovalRefusalReason, ApprovalStatus
+from aegisdesk.domain.enums import ActorType, ApprovalRefusalReason, ApprovalStatus, AuditEventType
 from aegisdesk.domain.errors import (
     AegisDeskError,
     ApprovalCapacityError,
@@ -67,12 +70,14 @@ class InMemoryApprovalStore(ApprovalStore):
         directory: DirectoryBackend,
         reviewers: frozenset[ReviewerId],
         policy: ApprovalPolicy,
+        audit: AuditSink,
         clock: Callable[[], datetime] = _utc_now,
         max_pending_per_workflow: int = MAX_PENDING_APPROVALS_PER_WORKFLOW,
     ) -> None:
         self._directory = directory
         self._reviewers = reviewers
         self._policy = policy
+        self._audit = audit
         self._clock = clock
         self._max_pending = max_pending_per_workflow
         self._records: dict[tuple[WorkflowId, ActionId], ApprovalRecord] = {}
@@ -170,7 +175,27 @@ class InMemoryApprovalStore(ApprovalStore):
 
         stored = self._decided(record, reviewer.reviewer_id, target)
         self._records[record.workflow_id, record.action_id] = stored
+        self._record_reviewer_decision(stored, target)
         return stored
+
+    # A reviewer's decision is part of the security-relevant approval trajectory, so it is
+    # recorded on the append-only trail. Best-effort: the decision is already durable in the
+    # record above, and a failure of the recording boundary must not undo a decision a reviewer
+    # made. The entry is keyed on (workflow, action), and a decided record is terminal, so it is
+    # written once.
+    def _record_reviewer_decision(self, record: ApprovalRecord, target: ApprovalStatus) -> None:
+        with contextlib.suppress(Exception):
+            self._audit.record(
+                AuditEvent.build(
+                    event_type=AuditEventType.REVIEWER_DECISION,
+                    occurred_at=self._clock(),
+                    actor_type=ActorType.REVIEWER,
+                    actor_id=record.reviewer_id,
+                    workflow_id=record.workflow_id,
+                    action_id=record.action_id,
+                    detail=target.value,
+                )
+            )
 
     def _decided(
         self, record: ApprovalRecord, reviewer_id: ReviewerId, target: ApprovalStatus

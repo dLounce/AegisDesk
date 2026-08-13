@@ -6,6 +6,7 @@ import pytest
 from aegisdesk.action import ProposedAction
 from aegisdesk.backends.access import AccessBackend
 from aegisdesk.backends.approvals import InMemoryApprovalStore
+from aegisdesk.backends.audit import InMemoryAuditSink
 from aegisdesk.backends.catalog import ResourceCatalog
 from aegisdesk.backends.directory import DirectoryBackend
 from aegisdesk.backends.seed import (
@@ -20,7 +21,9 @@ from aegisdesk.backends.tickets import InMemoryTicketStore
 from aegisdesk.domain.access import ExecutionReceipt
 from aegisdesk.domain.enums import (
     AccessDuration,
+    ActorType,
     AgentName,
+    AuditEventType,
     GuardOutcome,
     GuardRefusalReason,
     Permission,
@@ -90,15 +93,23 @@ class Clock:
         return self.at
 
 
+class RaisingAuditSink(InMemoryAuditSink):
+    """A recording boundary that is down: every write raises."""
+
+    def record(self, event: Any) -> Any:
+        raise RuntimeError("audit sink is down")
+
+
 class Fixture:
-    def __init__(self, risk_tiers: Any = None) -> None:
+    def __init__(self, risk_tiers: Any = None, audit: Any = None) -> None:
         self.clock = Clock(AT)
+        self.audit = InMemoryAuditSink() if audit is None else audit
         self.directory = RecordingDirectory(load_employees(), load_baseline_access())
         self.catalog = RecordingCatalog(load_resources())
-        self.tickets = InMemoryTicketStore(clock=lambda: AT)
+        self.tickets = InMemoryTicketStore(self.audit, clock=lambda: AT)
         self.access = RecordingAccess()
         self.approvals = InMemoryApprovalStore(
-            self.directory, load_reviewers(), load_approval_policy(), self.clock
+            self.directory, load_reviewers(), load_approval_policy(), self.audit, self.clock
         )
         self.guard = RuntimeGuard(
             self.directory,
@@ -107,6 +118,7 @@ class Fixture:
             load_risk_tiers() if risk_tiers is None else risk_tiers,
             self.access,
             self.approvals,
+            self.audit,
             self.clock,
         )
         self.own_ticket = self.tickets.create(EmployeeId(SELF), "access request").ticket_id
@@ -499,6 +511,7 @@ def test_a_second_guard_cannot_bind_to_a_backend_that_has_an_authority(
             load_risk_tiers(),
             fixture.access,
             fixture.approvals,
+            fixture.audit,
             fixture.clock,
         )
 
@@ -506,3 +519,112 @@ def test_a_second_guard_cannot_bind_to_a_backend_that_has_an_authority(
 def test_the_bound_guard_still_executes(fixture: Fixture) -> None:
     # The key the guard claimed at construction is what makes its own receipts usable.
     assert fixture.propose().outcome is GuardOutcome.EXECUTED
+
+
+# --- audit trail (propose side) --------------------------------------------------------------
+
+
+def _types(fixture: Fixture) -> list[AuditEventType]:
+    return [event.event_type for event in fixture.audit.events()]
+
+
+def test_an_executed_action_records_one_executed_event(fixture: Fixture) -> None:
+    outcome = fixture.propose()
+    assert outcome.outcome is GuardOutcome.EXECUTED
+    events = fixture.audit.events()
+    assert [event.event_type for event in events] == [AuditEventType.EXECUTED]
+    recorded = events[0]
+    assert recorded.actor_type is ActorType.RUNTIME
+    assert recorded.action_id == outcome.action_id
+    assert recorded.decision is not None
+    assert recorded.decision.reason is PolicyReason.WITHIN_BASELINE
+
+
+def test_the_executed_event_is_written_before_the_grant_is_minted() -> None:
+    # Fail-closed: if the recording boundary is down, the write raises and no grant is issued.
+    fixture = Fixture(audit=RaisingAuditSink())
+    with pytest.raises(RuntimeError):
+        fixture.propose()
+    assert fixture.access.writes == 0
+
+
+def test_a_repeated_execution_records_one_event(fixture: Fixture) -> None:
+    # The pre-pause pass re-runs on resume. The executed event is keyed on the action identifier,
+    # so the second pass records nothing new and the grant is the same one.
+    first = fixture.propose()
+    second = fixture.propose()
+    assert first.grant == second.grant
+    assert _types(fixture) == [AuditEventType.EXECUTED]
+
+
+def test_a_pending_action_records_the_proposal_and_the_pause(fixture: Fixture) -> None:
+    outcome = fixture.propose(
+        resource_id="prod-db", permission=Permission.ADMIN, duration=AccessDuration.EIGHT_HOURS
+    )
+    assert outcome.outcome is GuardOutcome.AWAITING_APPROVAL
+    assert _types(fixture) == [
+        AuditEventType.PROPOSAL_PERSISTED,
+        AuditEventType.AWAITING_APPROVAL,
+    ]
+    for event in fixture.audit.events():
+        assert event.action_id == outcome.action_id
+        assert event.actor_type is ActorType.RUNTIME
+
+
+def test_a_replayed_pending_proposal_records_nothing_new(fixture: Fixture) -> None:
+    fixture.propose(
+        resource_id="prod-db", permission=Permission.ADMIN, duration=AccessDuration.EIGHT_HOURS
+    )
+    fixture.propose(
+        resource_id="prod-db", permission=Permission.ADMIN, duration=AccessDuration.EIGHT_HOURS
+    )
+    assert _types(fixture) == [
+        AuditEventType.PROPOSAL_PERSISTED,
+        AuditEventType.AWAITING_APPROVAL,
+    ]
+
+
+def test_a_refusal_reaches_the_trail_while_the_model_sees_one_sentence(fixture: Fixture) -> None:
+    outcome = fixture.propose(agent=AgentName.RESOLVER)
+    assert outcome.message == REFUSAL_MESSAGE
+    events = fixture.audit.events()
+    assert [event.event_type for event in events] == [AuditEventType.REFUSED]
+    # The precise reason travels on the trail, never in the message the model is handed.
+    assert events[0].refusal_reason == GuardRefusalReason.MISSING_CAPABILITY.value
+    assert REFUSAL_MESSAGE not in (events[0].refusal_reason or "")
+
+
+def test_a_pre_resolution_refusal_has_no_action_id_and_is_recorded_each_time(
+    fixture: Fixture,
+) -> None:
+    # No action identity means no key to deduplicate under, so each genuine attempt is its own
+    # line rather than being folded into one.
+    fixture.propose(agent=AgentName.RESOLVER)
+    fixture.propose(agent=AgentName.RESOLVER)
+    events = fixture.audit.events()
+    assert [event.event_type for event in events] == [
+        AuditEventType.REFUSED,
+        AuditEventType.REFUSED,
+    ]
+    assert all(event.action_id is None for event in events)
+
+
+def test_a_resolved_refusal_carries_its_action_id_and_deduplicates(fixture: Fixture) -> None:
+    # An inactive requester is denied by policy after resolution, so the refusal names an action
+    # and is keyed. A replay of the same refused action records one line.
+    session = authenticate_employee(INACTIVE, fixture.directory, AT)
+    first = fixture.propose(session=session, ticket_id=fixture.inactive_ticket)
+    fixture.propose(session=session, ticket_id=fixture.inactive_ticket)
+    assert first.refusal_reason is GuardRefusalReason.POLICY_REFUSED
+    events = fixture.audit.events()
+    assert [event.event_type for event in events] == [AuditEventType.REFUSED]
+    assert events[0].action_id == first.action_id
+
+
+def test_a_refusal_stands_even_when_the_trail_cannot_record_it() -> None:
+    # Best-effort for a non-executing outcome: a failed write must not convert a refusal into a
+    # raised exception.
+    fixture = Fixture(audit=RaisingAuditSink())
+    outcome = fixture.propose(agent=AgentName.RESOLVER)
+    assert outcome.outcome is GuardOutcome.REFUSED
+    assert outcome.refusal_reason is GuardRefusalReason.MISSING_CAPABILITY
