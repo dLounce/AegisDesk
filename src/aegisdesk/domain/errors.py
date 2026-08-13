@@ -22,3 +22,14 @@ class UnknownResourceError(AegisDeskError):
 # directory into a membership oracle.
 class CrossEmployeeAccessError(AegisDeskError):
     pass
+
+
+# Raised both for a ticket that does not exist and for one belonging to another employee.
+# A ticket the requester does not own does not exist as far as that requester is concerned;
+# separate errors would let a caller enumerate real ticket ids by comparing failures.
+class TicketNotFoundError(AegisDeskError):
+    pass
+
+
+class IllegalTicketTransitionError(AegisDeskError):
+    pass
