@@ -518,6 +518,35 @@ this boundary.
 *Status: partial — the data-side representation is implemented and tested; no consumer model
 binds it yet, and no claim is made that prompt injection is prevented.*
 
+### AD-51 — The vertical slice is a deterministic in-process supervisor, not an agent framework
+
+S12 wires the three agents to the control plane with the smallest orchestrator that reuses what
+S1-S11 built. It is an in-process function loop, not LangGraph, and its pause/resume boundary is
+`guard.propose` / `guard.execute_approved` — no separate checkpoint abstraction and no durable
+store. The agents turn untrusted model output into typed decisions: the Router maps a model
+category to a specialist through a fixed table (unknown category or risk fails closed); the
+Resolver answers routine work through the knowledge base with no privileged capability and stops
+rather than continue when a request turns privileged; the Escalation agent maps model output to a
+typed proposal and calls the guard, proposing only. A scripted, deterministic model drives them,
+so a scenario is reproducible and a compromised agent can be simulated by emitting exact output.
+
+`WorkflowState` carries only trajectory fields — workflow and ticket identifiers, the routed
+category, risk, and route, and the turn/handoff counters. It holds no `EmployeeSessionContext`,
+no employee identity, no approval authority, no policy decision, and no capability: identity stays
+authoritative runtime context re-read from the session on every step (AD-2), and a paused
+workflow re-authenticates the claimed identifier on resume rather than trusting a stored one. The
+supervisor makes no authorization decision itself; every such decision is delegated to the guard,
+policy, and approval store. `MAX_TURNS` and `MAX_HANDOFFS` bound the loop and fail closed, so a
+request that will not settle is refused rather than allowed to run away. A refusal shown to the
+model is generic; the reason is recorded on the audit trail.
+
+Known limitations, deferred to later phases: no durable checkpoint or process-restart recovery
+(the pending map is in-memory), no FastAPI or reviewer UI, no live model provider, and no
+evaluation harness. These are Project.md Phase 6/7/9/11 concerns; S12 is the Phase 3 slice.
+
+*Status: implemented and tested — routine, privileged (approve and reject), scope-change, and
+direct/indirect injection paths run end-to-end with unauthorized execution measured at zero.*
+
 ## 4. Pause and resume semantics
 
 This is the most consequential runtime behaviour in the system and is treated as a hard
@@ -595,15 +624,15 @@ not as a compliance claim. Every row will carry an honest status of *implemented
 
 | Risk | Intended control | Status |
 | --- | --- | --- |
-| Goal hijack via injected instructions | Untrusted-content separation; policy outside the model | Partial — KB text is demarcated into a data channel at the model-input boundary (AD-50) and policy/approval sit outside the model; no consumer model binds the boundary yet and prompt injection is not claimed solved |
-| Tool misuse | Strict argument schemas, enumerated permissions, resource catalogue | Partial |
+| Goal hijack via injected instructions | Untrusted-content separation; policy outside the model | Partial — the S12 supervisor drives Router/Resolver/Escalation through the guard; injected instructions (direct or via KB) reach no authorization because agents only propose and the guard decides (AD-50, AD-51). Prompt injection is not claimed solved |
+| Tool misuse | Strict argument schemas, enumerated permissions, resource catalogue | Partial — the Escalation agent maps model output to a typed proposal fail-closed and the guard re-validates; the Resolver holds no privileged capability (AD-51) |
 | Identity and privilege abuse | Session-derived identity, self-scoped reads, least-privilege capabilities | Partial |
 | Unexpected code execution | No arbitrary execution capability exists | Not started |
 | Memory and context poisoning | Authoritative approval lookup; conversation text cannot authorize | Partial — the store is authoritative and no path reaches it from text; the workflow memory it will sit beside does not exist yet |
-| Insecure inter-agent communication | Structured typed handoffs with explicit reasons | Not started |
-| Cascading failures | Turn, handoff, and tool-call limits; fail-closed defaults | Not started |
-| Human-agent trust exploitation | Reviewers see the raw proposed action, not a model summary | Partial — the approval record holds the resolved action and the policy decision and carries no agent prose; no reviewer interface exists yet |
-| Rogue agent behaviour | Fixed capability sets and termination limits | Partial — capability sets exist, termination limits do not |
+| Insecure inter-agent communication | Structured typed handoffs with explicit reasons | Partial — the supervisor passes typed routing/proposal state between agents (AD-51); no free-form natural-language handoff carries authority. Cross-process/authenticated inter-agent messaging is out of scope |
+| Cascading failures | Turn, handoff, and tool-call limits; fail-closed defaults | Partial — MAX_TURNS and MAX_HANDOFFS bound the S12 supervisor and fail closed on exhaustion (AD-51); tool-call limits and workflow deadlines are not yet added |
+| Human-agent trust exploitation | Reviewers see the raw proposed action, not a model summary | Partial — the approval record and the paused turn expose the resolved action, not agent prose; no reviewer interface exists yet |
+| Rogue agent behaviour | Fixed capability sets and termination limits | Partial — capability sets are enforced and the supervisor has termination limits (AD-51); a compromised Router can still reach Escalation, which the guard contains at the approval boundary |
 
 ## 8. Testing approach
 
