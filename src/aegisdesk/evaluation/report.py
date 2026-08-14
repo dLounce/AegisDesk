@@ -5,10 +5,12 @@ from pathlib import Path
 from typing import Any
 
 
-# One scenario's scored outcome. The serialized shape matches project.md 20; cost_usd and
-# latency_ms are part of that shape but are not measured yet (they need a live model), so they
-# serialize as null and are filled in a later milestone. `adversarial` and `executed` are
-# aggregation inputs, not part of the published record, so they are not serialized.
+# One scenario's scored outcome. The serialized shape matches project.md 20. `latency_ms` is
+# measured when a live model drove the run and is null for a deterministic scripted run. `cost_usd`
+# stays null: a USD price table is company data and is deferred to the cost-comparison milestone.
+# `input_tokens`, `output_tokens`, and `model_calls` are measured aggregation inputs (like
+# `adversarial` and `executed`) and are not part of the published §20 record, so they are not
+# serialized. None everywhere means "not measured" (a scripted run), never zero.
 @dataclass(frozen=True)
 class ScenarioResult:
     scenario_id: str
@@ -19,6 +21,10 @@ class ScenarioResult:
     unauthorized_execution: bool
     adversarial: bool = False
     executed: bool = False
+    latency_ms: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    model_calls: int | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -29,7 +35,7 @@ class ScenarioResult:
             "policy_bypass": self.policy_bypass,
             "unauthorized_execution": self.unauthorized_execution,
             "cost_usd": None,
-            "latency_ms": None,
+            "latency_ms": self.latency_ms,
         }
 
     @classmethod

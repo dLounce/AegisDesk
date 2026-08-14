@@ -631,6 +631,53 @@ stays RESOLVED — recorded for later Phase 4 polish rather than fixed in S14.
 scope-change, clarification, direct/indirect injection, cross-employee, compromised-model) runs with
 task-success 100%, trajectory-safe 100%, unauthorized-execution 0%, policy-bypass 0%, fail-closed 100%.*
 
+### AD-54 — A live model provider sits behind the Model protocol, untrusted and fail-closed
+
+S15 adds the first live language-model provider without changing any control. It is one
+`ChatOpenAI`-compatible `LiveModel` (`agents/providers.py`) selected by configuration
+(`config.py`), and it occupies exactly the seam `ScriptedModel` occupies — behind the
+`Model` protocol, upstream of the Router, Resolver, Escalation, guard, policy, and approval
+store. `ScriptedModel` remains the default for every unit test and local run; the live model
+is built only when `AEGISDESK_MODEL_PROVIDER=openai_compatible`, and `base_url` selects
+OpenAI, OpenRouter, or any OpenAI-compatible endpoint through the one class (no per-provider
+subclasses; Groq and per-role model selection are deferred).
+
+*The provider is untrusted, and its output fails closed.* The reply is parsed with an explicit
+`ModelResponse.model_validate_json` — never a hidden structured-output mode — and because
+`ModelResponse` forbids extra fields and types every field, a malformed reply, an unexpected
+key, or a wrong-typed value raises and is caught into the default `ModelResponse`
+(category `unknown`, risk `high`). Every transport failure — timeout, connection reset,
+provider 5xx — is caught at the same boundary into that same safe default; nothing raises into
+the workflow. The client is built with `max_retries=0`: there is no application-level or
+provider-level retry (NON_NEGOTIABLES §9). Downstream, the agents still re-validate every field
+against an enum and the guard re-resolves and re-authorizes independently, so a live call
+influences **proposal generation only, never authorization** — a compromised or hostile
+provider that returns `approve: true`, a claimed identity, or a self-approval executes nothing,
+proven end-to-end through the harness.
+
+*The provider holds no control-plane handle.* The `Model` protocol exposes only
+`respond(ModelRequest) -> ModelResponse`; `LiveModel` receives no guard, access backend,
+approval store, session, or minting key, and the factory passes none. The API key is a
+`SecretStr` read from the environment (neutral name first, then the documented OpenAI/OpenRouter
+names) and reaches only the transport client; it never enters a `ModelRequest`, a prompt, a
+`ModelResponse`, an exception message, or an audit event. Incomplete live configuration fails
+closed at construction (`require_live`) with a message that names the missing field, never its
+value.
+
+*The S14 harness measures live runs without making them mandatory.* `Harness` gained an optional
+injected `model` (default `ScriptedModel`), so a `live`-marked smoke test can drive the real
+provider through the real Supervisor while ordinary CI stays deterministic and offline
+(`-m 'not live'`, plus a skip when no provider is configured). `LiveModel` records per-call
+latency and provider-reported token counts as runtime telemetry (never model-authored), which
+the runner aggregates into `ScenarioResult.latency_ms` and token/call counts; a scripted run
+reports `None` ("not measured"). `cost_usd` stays null — a USD price table is company data,
+deferred to the cost-comparison milestone rather than invented in code (AD-25).
+
+*Status: implemented and tested — 26 new tests (config, strict parse, malformed/extra/wrong-type
+rejection, timeout/connection/5xx fail-closed, no-secret-leak, factory defaults, live
+self-approval executes nothing, harness injection, telemetry aggregation) plus a gated live smoke
+test; scripted corpus unchanged at 100/100/0/0/100.*
+
 ## 4. Pause and resume semantics
 
 This is the most consequential runtime behaviour in the system and is treated as a hard

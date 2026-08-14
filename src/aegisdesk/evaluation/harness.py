@@ -1,7 +1,7 @@
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
-from aegisdesk.agents.model import ScriptedModel
+from aegisdesk.agents.model import Model, ScriptedModel
 from aegisdesk.audit import AuditEvent
 from aegisdesk.backends.access import AccessBackend
 from aegisdesk.backends.approvals import InMemoryApprovalStore
@@ -86,7 +86,13 @@ class RecordingAccessBackend(AccessBackend):
 # guard and access backend; it never hands them to scenario data (F3). It contains no test
 # assertions: it is production wiring reused by tests, not a test fixture.
 class Harness:
-    def __init__(self, script: ScenarioScript, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        script: ScenarioScript,
+        clock: Callable[[], datetime] | None = None,
+        *,
+        model: Model | None = None,
+    ) -> None:
         self.clock: Callable[[], datetime] = clock if clock is not None else (lambda: AT)
         self.audit = InMemoryAuditSink()
         self.directory = DirectoryBackend(load_employees(), load_baseline_access())
@@ -110,8 +116,12 @@ class Harness:
             reversibility=load_action_reversibility(),
         )
         self.kb = KnowledgeBase(load_kb_documents())
-        # The scenario-controlled artifact, built last.
-        self.model = ScriptedModel(dict(script))
+        # The model, built last — after the guard has already claimed the minting key. The default
+        # is a ScriptedModel from the (untrusted) scenario script. An injected model (e.g. a live
+        # provider for the gated smoke test) is supplied by the caller and, like ScriptedModel, is
+        # never handed the guard, the access backend, or the minting key: the seam carries only
+        # ModelRequest in and ModelResponse out.
+        self.model: Model = model if model is not None else ScriptedModel(dict(script))
         # Imported lazily to avoid a module import cycle (workflow imports evaluation types only
         # in tests, but keeping this local documents that the harness depends on the supervisor,
         # not the reverse).

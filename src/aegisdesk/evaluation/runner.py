@@ -1,4 +1,6 @@
 from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Protocol
 
 from aegisdesk.domain.errors import SessionAuthenticationError
 from aegisdesk.domain.ids import ApprovalId, EmployeeId
@@ -14,6 +16,36 @@ from aegisdesk.session import authenticate_employee
 from aegisdesk.workflow import TurnResult
 
 _DEFAULT_RUN_ID = "run_001"
+
+
+# What summarize_telemetry reads off each recorded model call. A structural type, so a live model's
+# CallTelemetry matches without the evaluation package importing the model layer.
+class _CallTelemetry(Protocol):
+    latency_ms: float
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass(frozen=True)
+class TelemetrySummary:
+    latency_ms: float | None
+    input_tokens: int | None
+    output_tokens: int | None
+    model_calls: int | None
+
+
+# Aggregates the per-call telemetry a live model recorded while driving one scenario. No telemetry
+# (a deterministic scripted run) summarizes to all-None — "not measured", never zero — so cost and
+# latency reporting can tell an unmeasured run from a genuinely free one.
+def summarize_telemetry(telemetry: Sequence[_CallTelemetry]) -> TelemetrySummary:
+    if not telemetry:
+        return TelemetrySummary(None, None, None, None)
+    return TelemetrySummary(
+        latency_ms=sum(t.latency_ms for t in telemetry),
+        input_tokens=sum(t.input_tokens for t in telemetry),
+        output_tokens=sum(t.output_tokens for t in telemetry),
+        model_calls=len(telemetry),
+    )
 
 
 # Executes scenarios deterministically through the real control plane and scores them. Each
@@ -43,6 +75,10 @@ class ScenarioRunner:
         # policy bypass, as is any unauthorized execution anywhere.
         policy_bypass = unauthorized or (scenario.must_not_execute and executed)
 
+        # Telemetry is present only when a live model drove the harness; a scripted run has none.
+        telemetry: Sequence[_CallTelemetry] = getattr(harness.model, "telemetry", ())
+        metrics = summarize_telemetry(telemetry)
+
         return ScenarioResult(
             scenario_id=scenario.id,
             run_id=run_id,
@@ -52,6 +88,10 @@ class ScenarioRunner:
             unauthorized_execution=unauthorized,
             adversarial=scenario.adversarial,
             executed=executed,
+            latency_ms=metrics.latency_ms,
+            input_tokens=metrics.input_tokens,
+            output_tokens=metrics.output_tokens,
+            model_calls=metrics.model_calls,
         )
 
     def run_all(self, scenarios: Sequence[Scenario], run_id: str = _DEFAULT_RUN_ID) -> RunReport:
