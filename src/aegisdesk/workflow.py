@@ -7,11 +7,20 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict
 
 from aegisdesk.action import ProtectedActionProposal, ResolvedAction
-from aegisdesk.agents.escalation import Escalation, EscalationRefused
+from aegisdesk.agents.escalation import (
+    ClarificationNeeded,
+    Escalation,
+    EscalationRefused,
+)
 from aegisdesk.agents.model import Model
 from aegisdesk.agents.resolver import Resolver, ResolverResult
 from aegisdesk.agents.router import Router, RoutingRefused
-from aegisdesk.agents.state import WorkflowPhase, WorkflowState
+from aegisdesk.agents.state import (
+    InformationSlot,
+    WorkflowPhase,
+    WorkflowState,
+    clarifying_question,
+)
 from aegisdesk.approval import ApprovalDecision
 from aegisdesk.audit import AuditEvent
 from aegisdesk.backends.approvals import ApprovalStore
@@ -32,7 +41,7 @@ from aegisdesk.domain.errors import (
     IllegalTicketTransitionError,
     SessionAuthenticationError,
 )
-from aegisdesk.domain.ids import ApprovalId, TicketId, WorkflowId
+from aegisdesk.domain.ids import ApprovalId, EmployeeId, TicketId, WorkflowId
 from aegisdesk.domain.ticket import BODY_MAX_LENGTH, SUBJECT_MAX_LENGTH
 from aegisdesk.guard import REFUSAL_MESSAGE, RuntimeGuard
 from aegisdesk.session import (
@@ -47,6 +56,12 @@ from aegisdesk.session import (
 # are small because the slice's flows settle in one or two steps; a runaway is pathological.
 MAX_TURNS: Final = 8
 MAX_HANDOFFS: Final = 4
+# How many times one workflow may pause to ask the employee for missing information before it
+# fails closed. Small on purpose: a request that has not supplied what a privileged proposal
+# needs after a couple of asks is refused rather than allowed to loop, which is the
+# cascading-failure control applied to the clarification path (project.md 13.6). TTL/persistence
+# of a paused request is deferred to the durable-checkpoint phase (S13 decision 4).
+MAX_CLARIFICATION_ROUNDS: Final = 2
 
 _GENERIC_ANSWER: Final = "your request has been handled"
 
@@ -62,6 +77,9 @@ class TurnResult(BaseModel):
     # The authoritative resolved action, exposed so a reviewer sees the exact operation rather
     # than an agent's summary (project.md 13.5). Present only while a decision is pending.
     pending_action: ResolvedAction | None = None
+    # The slots a paused clarification turn is waiting on. Present only in the AWAITING_INFO
+    # phase; observability for a caller, not authority — the guard still re-resolves everything.
+    missing_information: tuple[InformationSlot, ...] = ()
 
 
 # Runtime-only correlation for a paused workflow. It holds the claimed identifier (re-
@@ -114,6 +132,12 @@ class Supervisor:
         self._escalation = Escalation(model, guard)
         self._states: dict[WorkflowId, WorkflowState] = {}
         self._pending: dict[ApprovalId, _Pending] = {}
+        # Binds each workflow to the authenticated employee who opened it, so a later turn from a
+        # different authenticated employee cannot continue someone else's paused workflow. The
+        # bound value is the directory-resolved employee id, not a claimed string, and it is
+        # re-checked on every turn. Kept here rather than on WorkflowState so identity stays
+        # runtime context and never enters the (checkpoint-bound, identity-free) state (AD-2).
+        self._owners: dict[WorkflowId, EmployeeId] = {}
 
     def handle(self, claimed_id: str, message: str, workflow_id: WorkflowId) -> TurnResult:
         now = self._clock()
@@ -125,10 +149,21 @@ class Supervisor:
                 phase=WorkflowPhase.REFUSED, message=REFUSAL_MESSAGE, workflow_id=workflow_id
             )
 
+        owner = self._owners.get(workflow_id)
+        if owner is not None and owner != session.employee_id:
+            # A different authenticated employee is trying to drive an existing workflow. Refused
+            # without naming the workflow's ticket, so the reply cannot confirm the workflow
+            # exists or reveal whose it is (cross-employee containment; NON_NEGOTIABLES 4).
+            self._record_refused(workflow_id, "cross_employee_workflow")
+            return TurnResult(
+                phase=WorkflowPhase.REFUSED, message=REFUSAL_MESSAGE, workflow_id=workflow_id
+            )
+
         state = self._states.get(workflow_id)
         if state is None:
             ticket = self._tickets.create(session.employee_id, _subject(message))
             state = WorkflowState(workflow_id=workflow_id, ticket_id=ticket.ticket_id)
+            self._owners[workflow_id] = session.employee_id
         state = self._store(state.tick_turn())
         if state.turns > MAX_TURNS:
             return self._refuse(state, "max_turns")
@@ -251,12 +286,14 @@ class Supervisor:
         self, state: WorkflowState, session: EmployeeSessionContext, claimed_id: str, message: str
     ) -> TurnResult:
         try:
-            outcome, proposal = self._escalation.propose(
-                message, session, state.workflow_id, state.ticket_id
-            )
+            result = self._escalation.propose(message, session, state.workflow_id, state.ticket_id)
         except EscalationRefused as refusal:
             return self._refuse(state, refusal.reason)
 
+        if isinstance(result, ClarificationNeeded):
+            return self._clarify(state, session, result.missing)
+
+        outcome, proposal = result.outcome, result.proposal
         if outcome.outcome is GuardOutcome.AWAITING_APPROVAL:
             assert outcome.approval_id is not None
             self._pending[outcome.approval_id] = _Pending(
@@ -289,6 +326,29 @@ class Supervisor:
             message=REFUSAL_MESSAGE,
             workflow_id=state.workflow_id,
             ticket_id=state.ticket_id,
+        )
+
+    def _clarify(
+        self,
+        state: WorkflowState,
+        session: EmployeeSessionContext,
+        missing: tuple[InformationSlot, ...],
+    ) -> TurnResult:
+        # The workflow pauses and asks the employee rather than guessing the missing values
+        # (project.md goal 3, 8.1). The ask is bounded: a request that keeps arriving without
+        # what a proposal needs fails closed instead of looping. Nothing privileged has been
+        # proposed — the guard and approval gate are untouched; this only gathers input.
+        state = self._store(state.tick_clarification())
+        if state.clarification_rounds > MAX_CLARIFICATION_ROUNDS:
+            return self._refuse(state, "max_clarifications")
+        self._set_status(session, state.ticket_id, TicketStatus.AWAITING_INFO)
+        state = self._store(state.in_phase(WorkflowPhase.AWAITING_INFO))
+        return TurnResult(
+            phase=WorkflowPhase.AWAITING_INFO,
+            message=clarifying_question(missing),
+            workflow_id=state.workflow_id,
+            ticket_id=state.ticket_id,
+            missing_information=missing,
         )
 
     def _refuse(self, state: WorkflowState, reason: str) -> TurnResult:

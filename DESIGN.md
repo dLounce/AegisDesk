@@ -547,6 +547,50 @@ evaluation harness. These are Project.md Phase 6/7/9/11 concerns; S12 is the Pha
 *Status: implemented and tested — routine, privileged (approve and reject), scope-change, and
 direct/indirect injection paths run end-to-end with unauthorized execution measured at zero.*
 
+### AD-52 — Clarification is deterministic slot-filling, not a model-driven conversation
+
+S13 lets a privileged request that is missing information pause and ask the employee rather than
+guessing (project.md goal 3, §8.1). Four properties keep the pause from becoming a new trust
+surface:
+
+*Required slots are declared in code, per protected operation* (`agents/escalation.py`,
+`_REQUIRED_SLOTS`): a grant needs resource, permission, and duration; revoke and modify carry no
+duration. No configuration surface is added — the schema is version-controlled with the code that
+uses it.
+
+*The model extracts candidate values; code decides completeness.* A required slot is "missing"
+only when its candidate on the model response is empty. The model can never mark a slot optional
+or complete: a non-empty but invalid candidate is not treated as missing, it fails closed in
+`_build` (unknown permission/duration) exactly as before, so a compromised model cannot turn a
+garbage value into a clarification loop, and an absent operation is refused rather than asked.
+
+*The question is a fixed template keyed by the missing slot* (`agents/state.py`,
+`clarifying_question`). Model prose never reaches the employee as a question, which removes a
+model-authored-instruction surface and keeps the workflow reproducible.
+
+*The pause stores no authoritative state.* `WorkflowState` gains only a `clarification_rounds`
+counter, never the extracted values — each turn re-classifies and re-extracts, and any resulting
+privileged proposal is still re-resolved, re-digested, policy-evaluated, and human-approved by the
+guard. The clarification answer is untrusted employee text: a claimed identity or self-approval in
+it is ignored, because identity is re-authenticated from the session every turn and approval comes
+only from the authoritative record.
+
+Two containment controls bound the new multi-turn surface. `MAX_CLARIFICATION_ROUNDS` fails closed
+so a request that never supplies what it needs is refused rather than looping (cascading-failure
+control, §13.6). And the supervisor now binds each workflow to the authenticated employee who
+opened it (`_owners`, keyed by directory-resolved employee id, re-checked every turn), so a second
+authenticated employee cannot continue someone else's paused workflow; the refusal names no ticket,
+so it is not an oracle for which workflows exist. The binding lives in runtime context, not on
+`WorkflowState`, so identity still never enters the checkpoint-bound state (AD-2).
+
+Deferred: no time-based expiry of a paused request (TTL belongs with the durable-checkpoint phase);
+no cross-turn accumulation of prior message text into model context (there is no live-model
+consumer yet, so transcript assembly would be speculative — it lands with the model-provider phase).
+
+*Status: implemented and tested — missing-slot pause/resume, deterministic question, bounded
+rounds, cross-employee resume refusal, and ignored-identity/approval answers run end-to-end with
+unauthorized execution measured at zero.*
+
 ## 4. Pause and resume semantics
 
 This is the most consequential runtime behaviour in the system and is treated as a hard
