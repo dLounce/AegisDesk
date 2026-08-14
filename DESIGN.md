@@ -29,7 +29,7 @@ The reasoning half is treated as untrusted. It is useful, not authoritative.
 | Agent → runtime guard | Capability registry, policy engine, backend state | Tool name and arguments proposed by a model |
 | Store → resume | Approval record read back from the store | The interrupt resume payload |
 | Backend → tool | Server-side authorization on every call | The claim that a call was already authorized |
-| Knowledge base → agent | Document contents as *data* | Document contents as *instructions* |
+| Knowledge base → agent | Document contents as *data* (rendered into the DATA channel, AD-50) | Document contents as *instructions* |
 
 Everything the model can influence is on the untrusted side of at least one boundary.
 
@@ -493,6 +493,31 @@ durable.
 
 *Status: implemented.*
 
+### AD-50 — KB content is demarcated as data at a typed model-input boundary
+
+`prompting.py` is where retrieved knowledge-base text is turned into model input. It builds a
+`ModelInput` of channel-tagged `Segment` objects: `Channel.INSTRUCTION` for text authored in code,
+`Channel.DATA` for everything untrusted. The channel is the boundary — it is a field set at
+construction, and no code path reads a segment's text back to decide its channel, so
+instruction-looking bytes inside a KB body stay data. `render_kb_document` can only emit
+`Channel.DATA`, and `assemble` refuses any non-DATA segment offered in the data position, so the
+untrusted-content path cannot carry instruction authority. The stored `KbDocument` is read, never
+mutated; its body is embedded verbatim (the poisoned fixture flows through unchanged, unfiltered).
+A nonce fence is included around each rendered body as a legibility aid and defence in depth; its
+uniqueness is deliberately **not** relied on as the security boundary, because an in-band delimiter
+is spoofable by construction and the channel field is what actually separates the two.
+
+This is one layer, not a solution to prompt injection. There is no model-call consumer yet, so the
+boundary is a representation that keeps untrusted text in a data channel; it does not stop a model
+from being persuaded by data it is shown. The authoritative defence against an injected instruction
+remains the deterministic gate (AD-1, policy, approval): even a fully hijacked agent cannot turn KB
+text into a grant without policy evaluation and a human approval decision recorded against the
+specific action. Scope is KB content only; ticket text and model-output demarcation are not part of
+this boundary.
+
+*Status: partial — the data-side representation is implemented and tested; no consumer model
+binds it yet, and no claim is made that prompt injection is prevented.*
+
 ## 4. Pause and resume semantics
 
 This is the most consequential runtime behaviour in the system and is treated as a hard
@@ -570,7 +595,7 @@ not as a compliance claim. Every row will carry an honest status of *implemented
 
 | Risk | Intended control | Status |
 | --- | --- | --- |
-| Goal hijack via injected instructions | Untrusted-content separation; policy outside the model | Not started |
+| Goal hijack via injected instructions | Untrusted-content separation; policy outside the model | Partial — KB text is demarcated into a data channel at the model-input boundary (AD-50) and policy/approval sit outside the model; no consumer model binds the boundary yet and prompt injection is not claimed solved |
 | Tool misuse | Strict argument schemas, enumerated permissions, resource catalogue | Partial |
 | Identity and privilege abuse | Session-derived identity, self-scoped reads, least-privilege capabilities | Partial |
 | Unexpected code execution | No arbitrary execution capability exists | Not started |
