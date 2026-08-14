@@ -17,6 +17,7 @@ from aegisdesk.domain.enums import (
     Permission,
     PolicyEffect,
     PolicyReason,
+    ProtectedOperation,
     ResourceClass,
     RiskTier,
 )
@@ -66,6 +67,7 @@ def request(**overrides: Any) -> PolicyRequest:
         "workflow_id": WORKFLOW,
         "action_id": ACTION,
         "evaluated_at": AT,
+        "operation": ProtectedOperation.GRANT_ACCESS,
         "requester": employee(),
         "resource": resource(),
         "permission": Permission.READ,
@@ -286,6 +288,7 @@ def unreadable_decision(**overrides: Any) -> dict[str, Any]:
         "policy_version": POLICY_VERSION,
         "effect": PolicyEffect.DENY,
         "reason": PolicyReason.EVALUATION_ERROR,
+        "operation": None,
         "workflow_id": None,
         "action_id": None,
         "evaluated_at": None,
@@ -333,6 +336,7 @@ def test_echo_a_readable_decision_must_carry_every_required_field(missing: str) 
     complete = unreadable_decision(
         effect=PolicyEffect.ALLOW,
         reason=PolicyReason.WITHIN_BASELINE,
+        operation=ProtectedOperation.GRANT_ACCESS,
         workflow_id=WORKFLOW,
         action_id=ACTION,
         evaluated_at=AT,

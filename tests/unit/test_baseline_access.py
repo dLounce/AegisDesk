@@ -10,6 +10,7 @@ from aegisdesk.domain.enums import (
     Permission,
     PolicyEffect,
     PolicyReason,
+    ProtectedOperation,
     ResourceClass,
     RiskTier,
 )
@@ -140,6 +141,7 @@ def _request(
         workflow_id=WorkflowId("WF-0001"),
         action_id=ActionId("ACT-0001"),
         evaluated_at=AT,
+        operation=ProtectedOperation.GRANT_ACCESS,
         requester=directory.get_employee(requester_id, requester_id),
         resource=ResourceCatalog(load_resources()).get(resource_id),
         permission=permission,

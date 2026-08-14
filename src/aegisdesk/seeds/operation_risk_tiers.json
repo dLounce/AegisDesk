@@ -1,0 +1,20 @@
+[
+  { "operation": "revoke_access", "resource_class": "baseline", "permission": "read", "risk_tier": "low" },
+  { "operation": "revoke_access", "resource_class": "baseline", "permission": "write", "risk_tier": "medium" },
+  { "operation": "revoke_access", "resource_class": "baseline", "permission": "admin", "risk_tier": "high" },
+  { "operation": "revoke_access", "resource_class": "sensitive", "permission": "read", "risk_tier": "medium" },
+  { "operation": "revoke_access", "resource_class": "sensitive", "permission": "write", "risk_tier": "high" },
+  { "operation": "revoke_access", "resource_class": "sensitive", "permission": "admin", "risk_tier": "high" },
+  { "operation": "revoke_access", "resource_class": "privileged", "permission": "read", "risk_tier": "high" },
+  { "operation": "revoke_access", "resource_class": "privileged", "permission": "write", "risk_tier": "high" },
+  { "operation": "revoke_access", "resource_class": "privileged", "permission": "admin", "risk_tier": "critical" },
+  { "operation": "modify_permissions", "resource_class": "baseline", "permission": "read", "risk_tier": "low" },
+  { "operation": "modify_permissions", "resource_class": "baseline", "permission": "write", "risk_tier": "medium" },
+  { "operation": "modify_permissions", "resource_class": "baseline", "permission": "admin", "risk_tier": "high" },
+  { "operation": "modify_permissions", "resource_class": "sensitive", "permission": "read", "risk_tier": "medium" },
+  { "operation": "modify_permissions", "resource_class": "sensitive", "permission": "write", "risk_tier": "high" },
+  { "operation": "modify_permissions", "resource_class": "sensitive", "permission": "admin", "risk_tier": "high" },
+  { "operation": "modify_permissions", "resource_class": "privileged", "permission": "read", "risk_tier": "high" },
+  { "operation": "modify_permissions", "resource_class": "privileged", "permission": "write", "risk_tier": "high" },
+  { "operation": "modify_permissions", "resource_class": "privileged", "permission": "admin", "risk_tier": "critical" }
+]

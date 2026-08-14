@@ -7,6 +7,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, model_validator
 
 from aegisdesk.action import (
     ProposedAction,
+    ProtectedActionProposal,
     ResolvedAction,
     compute_argument_digest,
     derive_action_id,
@@ -25,7 +26,7 @@ from aegisdesk.backends.catalog import ResourceCatalog
 from aegisdesk.backends.directory import DirectoryBackend
 from aegisdesk.backends.tickets import TicketStore
 from aegisdesk.capabilities import REQUIRED_CAPABILITY, holds
-from aegisdesk.domain.access import AccessGrant, ExecutionReceipt
+from aegisdesk.domain.access import AccessChange, AccessGrant, DestructiveReceipt, ExecutionReceipt
 from aegisdesk.domain.employee import Employee
 from aegisdesk.domain.enums import (
     ActorType,
@@ -34,12 +35,21 @@ from aegisdesk.domain.enums import (
     AuditEventType,
     GuardOutcome,
     GuardRefusalReason,
+    OperationRiskTierConfiguration,
     Permission,
     PolicyEffect,
+    ProtectedOperation,
+    ReversibilityConfiguration,
     RiskTier,
     RiskTierConfiguration,
 )
-from aegisdesk.domain.errors import AegisDeskError, DomainInvariantError
+from aegisdesk.domain.errors import (
+    AegisDeskError,
+    CurrentAccessMismatchError,
+    DomainInvariantError,
+    NoCurrentAccessError,
+    UncertainDestructiveReplayError,
+)
 from aegisdesk.domain.ids import ActionId, ApprovalId, ArgumentDigest, TicketId, WorkflowId
 from aegisdesk.domain.resource import Resource
 from aegisdesk.policy import POLICY_VERSION, PolicyDecision, PolicyRequest, evaluate
@@ -51,6 +61,10 @@ from aegisdesk.session import EmployeeSessionContext
 # trail, not for the conversation.
 REFUSAL_MESSAGE: Final = "the requested action is not permitted"
 EXECUTION_MESSAGE: Final = "the requested access was granted"
+# A destructive operation reports completion without naming the resource or the permission, in
+# the same spirit as the grant message. It is a distinct sentence only because "granted" would
+# misdescribe a revoke or a modify to the employee.
+EXECUTION_CHANGE_MESSAGE: Final = "the requested access change was applied"
 # A pending action is told apart from a refused one, which is the one distinction the model is
 # allowed to draw. It has to be: the workflow pauses and the employee is told a human is
 # looking, and an agent that could not tell the two apart would report a refusal instead. The
@@ -109,7 +123,11 @@ class ProposalOutcome(BaseModel):
     # even one that found a record: the action identifier already names the record
     # deterministically, so an audit line loses nothing and a refused caller learns nothing.
     approval_id: ApprovalId | None
+    # A grant is the effect of a grant execution; an access change is the effect of a revoke or a
+    # modify. Exactly one is present on an executed outcome, chosen by the operation, and neither
+    # on a pending or refused one.
     grant: AccessGrant | None
+    access_change: AccessChange | None
     authorised_at: AwareDatetime | None
 
     # A property rather than a field, so the text cannot vary by construction site and a
@@ -117,6 +135,10 @@ class ProposalOutcome(BaseModel):
     @property
     def message(self) -> str:
         if self.outcome is GuardOutcome.EXECUTED:
+            if self.resolved is not None and self.resolved.operation is not (
+                ProtectedOperation.GRANT_ACCESS
+            ):
+                return EXECUTION_CHANGE_MESSAGE
             return EXECUTION_MESSAGE
         if self.outcome is GuardOutcome.AWAITING_APPROVAL:
             return PENDING_MESSAGE
@@ -126,17 +148,32 @@ class ProposalOutcome(BaseModel):
     def _outcome_agrees_with_record(self) -> Self:
         resolution = (self.resolved, self.action_id, self.argument_digest, self.decision)
         if self.outcome is GuardOutcome.EXECUTED:
-            required = (*resolution, self.grant, self.authorised_at)
-            if self.refusal_reason is not None or any(field is None for field in required):
+            if self.refusal_reason is not None or any(field is None for field in resolution):
                 raise DomainInvariantError("an executed outcome must carry a complete record")
+            if self.authorised_at is None:
+                raise DomainInvariantError("an executed outcome must carry its authorisation time")
+            # A grant execution carries a grant and no change; a destructive execution the
+            # reverse. The operation on the resolved action decides which, so an outcome cannot
+            # claim a grant for a revoke or a change for a grant.
+            assert self.resolved is not None
+            if self.resolved.operation is ProtectedOperation.GRANT_ACCESS:
+                if self.grant is None or self.access_change is not None:
+                    raise DomainInvariantError("a grant outcome must carry a grant and no change")
+            elif self.access_change is None or self.grant is not None:
+                raise DomainInvariantError("a destructive outcome must carry a change and no grant")
         elif self.outcome is GuardOutcome.AWAITING_APPROVAL:
             pending = (*resolution, self.approval_id)
             if self.refusal_reason is not None or any(field is None for field in pending):
                 raise DomainInvariantError("a pending outcome must name its approval record")
-            if self.grant is not None or self.authorised_at is not None:
-                raise DomainInvariantError("a pending outcome must carry no grant")
-        elif self.refusal_reason is None or self.grant is not None or self.approval_id is not None:
-            raise DomainInvariantError("a refusal must state a reason and carry no grant")
+            if self.grant is not None or self.access_change is not None or self.authorised_at:
+                raise DomainInvariantError("a pending outcome must carry no effect")
+        elif (
+            self.refusal_reason is None
+            or self.grant is not None
+            or self.access_change is not None
+            or self.approval_id is not None
+        ):
+            raise DomainInvariantError("a refusal must state a reason and carry no effect")
         return self
 
 
@@ -156,6 +193,7 @@ def _refused(
         decision=decision,
         approval_id=None,
         grant=None,
+        access_change=None,
         authorised_at=None,
     )
 
@@ -185,11 +223,18 @@ class RuntimeGuard:
         approvals: ApprovalStore,
         audit: AuditSink,
         clock: Callable[[], datetime] = _utc_now,
+        operation_risk_tiers: OperationRiskTierConfiguration | None = None,
+        reversibility: ReversibilityConfiguration | None = None,
     ) -> None:
         self._directory = directory
         self._catalog = catalog
         self._tickets = tickets
         self._risk_tiers = dict(risk_tiers)
+        # Configuration for the destructive operations, kept separate from the grant corpus above
+        # because they are keyed differently. Empty by default so a guard built for grant-only use
+        # is unchanged; a revoke or a modify with no tier or no reversibility entry fails closed.
+        self._operation_risk_tiers = dict(operation_risk_tiers or {})
+        self._reversibility = dict(reversibility or {})
         self._access = access
         self._approvals = approvals
         self._audit = audit
@@ -207,7 +252,7 @@ class RuntimeGuard:
         agent: AgentName,
         session: EmployeeSessionContext,
         workflow_id: WorkflowId,
-        action: ProposedAction,
+        action: ProtectedActionProposal,
     ) -> ProposalOutcome:
         now = self._clock()
         outcome = self._propose(agent, session, workflow_id, action, now)
@@ -219,7 +264,7 @@ class RuntimeGuard:
         agent: AgentName,
         session: EmployeeSessionContext,
         workflow_id: WorkflowId,
-        action: ProposedAction,
+        action: ProtectedActionProposal,
         now: datetime,
     ) -> ProposalOutcome:
         try:
@@ -266,7 +311,7 @@ class RuntimeGuard:
         agent: AgentName,
         session: EmployeeSessionContext,
         workflow_id: WorkflowId,
-        action: ProposedAction,
+        action: ProtectedActionProposal,
     ) -> ProposalOutcome:
         now = self._clock()
         outcome = self._execute_approved(agent, session, workflow_id, action, now)
@@ -278,7 +323,7 @@ class RuntimeGuard:
         agent: AgentName,
         session: EmployeeSessionContext,
         workflow_id: WorkflowId,
-        action: ProposedAction,
+        action: ProtectedActionProposal,
         now: datetime,
     ) -> ProposalOutcome:
         try:
@@ -306,7 +351,7 @@ class RuntimeGuard:
         agent: AgentName,
         session: EmployeeSessionContext,
         workflow_id: WorkflowId,
-        action: ProposedAction,
+        action: ProtectedActionProposal,
         now: datetime,
     ) -> tuple[ResolvedAction, ActionId, ArgumentDigest, PolicyDecision]:
         # Identity is checked before anything else. An object that merely carries an
@@ -316,7 +361,7 @@ class RuntimeGuard:
         # the proposal below, for the same reason policy.evaluate re-checks its argument.
         if not isinstance(session, EmployeeSessionContext):
             raise _Refused(GuardRefusalReason.UNTRUSTED_SESSION)
-        if not isinstance(action, ProposedAction):
+        if not isinstance(action, ProtectedActionProposal):
             raise _Refused(GuardRefusalReason.MALFORMED_PROPOSAL)
 
         # Before any backend read, so a caller without the capability learns nothing about the
@@ -332,12 +377,15 @@ class RuntimeGuard:
         baseline = self._baseline(session, resource)
         risk_tier = self._risk_tier(resource, action)
 
+        # Only a grant carries a duration; a revoke or a modify has no field for one, so the
+        # resolved action, the canonical form and the policy request all take None.
+        duration = action.duration if isinstance(action, ProposedAction) else None
         resolved = ResolvedAction(
             operation=action.operation,
             requester_id=requester.employee_id,
             resource_id=resource.resource_id,
             permission=action.permission,
-            duration=action.duration,
+            duration=duration,
             ticket_id=action.ticket_id,
             workflow_id=workflow_id,
         )
@@ -348,10 +396,11 @@ class RuntimeGuard:
                 workflow_id=workflow_id,
                 action_id=action_id,
                 evaluated_at=now,
+                operation=action.operation,
                 requester=requester,
                 resource=resource,
                 permission=action.permission,
-                duration=action.duration,
+                duration=duration,
                 baseline_permission=baseline,
                 risk_tier=risk_tier,
             )
@@ -393,6 +442,7 @@ class RuntimeGuard:
             decision=decision,
             approval_id=record.approval_id,
             grant=None,
+            access_change=None,
             authorised_at=None,
         )
 
@@ -475,12 +525,27 @@ class RuntimeGuard:
             raise _Refused(GuardRefusalReason.REVIEWER_NOT_ELIGIBLE)
         return record
 
+    # One executed outcome per operation kind. Grant and the destructive operations both reach
+    # execution only through this dispatch, so the resume checks above run identically for each.
+    def _execute(
+        self,
+        resolved: ResolvedAction,
+        action_id: ActionId,
+        digest: ArgumentDigest,
+        decision: PolicyDecision,
+        now: datetime,
+        approval_id: ApprovalId | None,
+    ) -> ProposalOutcome:
+        if resolved.operation is ProtectedOperation.GRANT_ACCESS:
+            return self._execute_grant(resolved, action_id, digest, decision, now, approval_id)
+        return self._execute_destructive(resolved, action_id, digest, decision, now, approval_id)
+
     # The executed event is written here, before the grant is minted, so it is fail-closed: if
     # the recording boundary raises, the exception propagates and no grant is issued. The write
     # is idempotent under the action identifier, so a replayed resume records one executed event
     # rather than two. Every other event the guard records is a non-executing outcome written
     # best-effort in _emit; only this one gates the grant.
-    def _execute(
+    def _execute_grant(
         self,
         resolved: ResolvedAction,
         action_id: ActionId,
@@ -500,6 +565,9 @@ class RuntimeGuard:
                 GuardRefusalReason.EXPIRED_GRANT_REPLAY, resolved, action_id, digest, decision
             )
 
+        # A grant always carries a duration; the dispatch above guarantees the operation, and the
+        # resolved record's own validator guarantees the duration, so this cannot be None here.
+        assert resolved.duration is not None
         self._record_executed(resolved, action_id, decision, now)
         grant = self._access.grant(
             ExecutionReceipt(
@@ -512,6 +580,75 @@ class RuntimeGuard:
             ),
             self._minting_key,
         )
+        return self._executed(resolved, action_id, digest, decision, now, approval_id, grant=grant)
+
+    # Revoke and modify. The authoritative current-access preconditions and the destructive ledger
+    # live in the backend, so each of its refusals maps to a fail-closed guard refusal and no
+    # outcome carries a change unless the backend confirmed one. Unlike a grant, the executed
+    # event is written after the change is confirmed rather than before: a revoke or a modify
+    # cannot be safely re-driven, so an event claiming execution must not precede an outcome the
+    # backend may refuse as uncertain (S10 decision 9; see DESIGN.md AD-46).
+    def _execute_destructive(
+        self,
+        resolved: ResolvedAction,
+        action_id: ActionId,
+        digest: ArgumentDigest,
+        decision: PolicyDecision,
+        now: datetime,
+        approval_id: ApprovalId | None,
+    ) -> ProposalOutcome:
+        receipt = DestructiveReceipt(
+            action_id=action_id,
+            operation=resolved.operation,
+            requester_id=resolved.requester_id,
+            resource_id=resolved.resource_id,
+            permission=resolved.permission,
+            authorised_at=now,
+        )
+        apply = (
+            self._access.revoke
+            if resolved.operation is ProtectedOperation.REVOKE_ACCESS
+            else self._access.modify
+        )
+        try:
+            change = apply(receipt, self._minting_key)
+        except CurrentAccessMismatchError:
+            return _refused(
+                GuardRefusalReason.CURRENT_ACCESS_MISMATCH, resolved, action_id, digest, decision
+            )
+        except NoCurrentAccessError:
+            return _refused(
+                GuardRefusalReason.NO_CURRENT_ACCESS, resolved, action_id, digest, decision
+            )
+        except UncertainDestructiveReplayError:
+            return _refused(
+                GuardRefusalReason.UNCERTAIN_DESTRUCTIVE_REPLAY,
+                resolved,
+                action_id,
+                digest,
+                decision,
+            )
+
+        self._record_executed(resolved, action_id, decision, now)
+        return self._executed(
+            resolved, action_id, digest, decision, now, approval_id, access_change=change
+        )
+
+    # The one shape an executed outcome takes, built here so a grant and a destructive change do
+    # not each spell out the full record and drift apart. Exactly one of grant and access_change
+    # is supplied; the outcome's own validator checks that against the operation.
+    def _executed(
+        self,
+        resolved: ResolvedAction,
+        action_id: ActionId,
+        digest: ArgumentDigest,
+        decision: PolicyDecision,
+        now: datetime,
+        approval_id: ApprovalId | None,
+        *,
+        grant: AccessGrant | None = None,
+        access_change: AccessChange | None = None,
+    ) -> ProposalOutcome:
         return ProposalOutcome(
             outcome=GuardOutcome.EXECUTED,
             refusal_reason=None,
@@ -521,12 +658,18 @@ class RuntimeGuard:
             decision=decision,
             approval_id=approval_id,
             grant=grant,
+            access_change=access_change,
             authorised_at=now,
         )
 
     def _record_executed(
         self, resolved: ResolvedAction, action_id: ActionId, decision: PolicyDecision, now: datetime
     ) -> None:
+        # A destructive execution records its trusted reversibility classification, so the trail
+        # says whether the change it names can be undone. It is read from configuration, never
+        # from anything a model supplied. A grant records no detail, as before.
+        reversibility = self._reversibility.get(resolved.operation)
+        detail = None if reversibility is None else reversibility.value
         self._audit.record(
             AuditEvent.build(
                 event_type=AuditEventType.EXECUTED,
@@ -536,6 +679,7 @@ class RuntimeGuard:
                 action_id=action_id,
                 outcome=GuardOutcome.EXECUTED,
                 decision=decision,
+                detail=detail,
             )
         )
 
@@ -554,7 +698,7 @@ class RuntimeGuard:
         except AegisDeskError:
             raise _Refused(GuardRefusalReason.UNRESOLVED_TICKET) from None
 
-    def _resource(self, action: ProposedAction) -> Resource:
+    def _resource(self, action: ProtectedActionProposal) -> Resource:
         try:
             return self._catalog.get(action.resource_id)
         except AegisDeskError:
@@ -565,8 +709,18 @@ class RuntimeGuard:
             session.employee_id, session.employee_id, resource.resource_id
         )
 
-    def _risk_tier(self, resource: Resource, action: ProposedAction) -> RiskTier:
-        tier = self._risk_tiers.get((resource.resource_class, action.permission, action.duration))
+    # Grant risk is keyed on the class, the permission and the duration; a revoke or a modify has
+    # no duration, so its tier is keyed on the operation, the class and the permission from the
+    # separate corpus. An unclassified triple fails closed either way (S10 decision 5).
+    def _risk_tier(self, resource: Resource, action: ProtectedActionProposal) -> RiskTier:
+        if isinstance(action, ProposedAction):
+            tier = self._risk_tiers.get(
+                (resource.resource_class, action.permission, action.duration)
+            )
+        else:
+            tier = self._operation_risk_tiers.get(
+                (action.operation, resource.resource_class, action.permission)
+            )
         if tier is None:
             raise _Refused(GuardRefusalReason.UNCLASSIFIED_RISK)
         return tier

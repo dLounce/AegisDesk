@@ -102,7 +102,14 @@ def test_the_backend_has_no_entry_point_taking_loose_identifiers() -> None:
     # A caller that skipped the guard has nothing to pass: there is no signature accepting an
     # employee and a resource directly.
     public = {name for name in dir(AccessBackend) if not name.startswith("_")}
-    assert public == {"grant", "grant_for", "claim_minting_authority"}
+    assert public == {
+        "grant",
+        "grant_for",
+        "claim_minting_authority",
+        "get_current_permission",
+        "revoke",
+        "modify",
+    }
 
 
 def test_an_unknown_action_has_no_grant() -> None:

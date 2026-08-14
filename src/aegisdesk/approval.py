@@ -64,7 +64,7 @@ DecisionTuple = tuple[
     EmployeeId,
     ResourceId | None,
     Permission,
-    AccessDuration,
+    AccessDuration | None,
 ]
 
 
@@ -86,7 +86,8 @@ class ApprovalRecord(BaseModel):
     operation: ProtectedOperation
     resource_id: ResourceId
     permission: Permission
-    duration: AccessDuration
+    # Present for a grant, absent for a revoke or a modify, which have no duration to record.
+    duration: AccessDuration | None
 
     argument_digest: ArgumentDigest
     policy_version: PolicyVersion
@@ -109,6 +110,11 @@ class ApprovalRecord(BaseModel):
         # reviewer who could approve what policy already refused (DESIGN.md AD-22).
         if self.effect is not PolicyEffect.REQUIRE_APPROVAL:
             raise DomainInvariantError("an approval record must carry a REQUIRE_APPROVAL decision")
+        is_grant = self.operation is ProtectedOperation.GRANT_ACCESS
+        if is_grant and self.duration is None:
+            raise DomainInvariantError("a grant record must carry a duration")
+        if not is_grant and self.duration is not None:
+            raise DomainInvariantError(f"a {self.operation.value} record must not carry a duration")
         if self.pending_expires_at <= self.created_at:
             raise DomainInvariantError("pending_expires_at must be later than created_at")
 
@@ -149,8 +155,9 @@ def effective_status(record: ApprovalRecord, at: datetime) -> ApprovalStatus:
 def decision_tuple(decision: PolicyDecision) -> DecisionTuple:
     # Only a readable decision reaches an approval record, and PolicyDecision's own validator
     # guarantees these fields are present for one, so the assertions below cannot fire through
-    # any reachable path. They exist because the type is Optional and mypy is strict.
-    if decision.requester_id is None or decision.permission is None or decision.duration is None:
+    # any reachable path. They exist because the type is Optional and mypy is strict. duration is
+    # deliberately not asserted: a readable revoke or modify decision carries none.
+    if decision.requester_id is None or decision.permission is None:
         raise DomainInvariantError("an unreadable decision has no comparable tuple")
     return (
         decision.policy_version,

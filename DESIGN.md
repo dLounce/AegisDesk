@@ -431,6 +431,68 @@ caller-facing error.
 durable non-repudiation: the trail lives in process memory and a restart loses it. Durable,
 tamper-evident storage is the §5 persistence concern.
 
+### AD-46 — Protected operations are typed per operation, not one flat shape
+
+`GRANT_ACCESS`, `REVOKE_ACCESS` and `MODIFY_PERMISSIONS` are three proposal subclasses of one
+frozen base rather than a single record with an operation field. A revoke and a modify carry no
+duration, and `extra="forbid"` means there is no field for one to arrive in — a duration on a
+destructive proposal is unrepresentable rather than an ignored sentinel. The grant proposal is
+unchanged, so the pinned golden action and digest vectors still hold: the canonical form omits
+the `duration` key when it is absent, which keeps a grant byte-identical while giving each
+destructive operation a distinct canonical form and therefore a distinct action identity.
+
+Duration is optional through the whole resolved chain — `ResolvedAction`, `PolicyRequest`,
+`PolicyDecision`, `ApprovalRecord`, the decision tuple — and a validator on each enforces that it
+is present exactly for a grant. The operation travels on the policy request and decision, which is
+what lets the engine decide destructive operations without inferring intent from the other fields.
+
+*Status: implemented.*
+
+### AD-47 — Destructive operations always require approval, and risk is keyed without a duration
+
+A revoke or a modify never resolves automatically. Policy decides both after the existing deny
+checks — an inactive requester or an unknown resource is still denied first — and before the
+grant-only baseline logic, so no narrowing or reversible case is auto-allowed. Their risk tier is
+keyed on the operation, the resource class and the permission, from a separate corpus, because
+they have no duration to key on; the grant corpus is untouched. An unclassified triple fails
+closed either way.
+
+*Status: implemented.*
+
+### AD-48 — Current access is authoritative backend state; reversibility is trusted config
+
+The access backend owns what access is currently issued. A grant records it, a revoke removes it,
+a modify re-points it, and `get_current_permission` is the smallest read the preconditions need.
+Baseline access is not a proxy and no separate current-access corpus exists. Revoke requires that
+the named permission is the one currently held; modify requires that some access exists to change.
+Both are enforced in the backend against its own state, so they hold even if a caller reaches it
+directly, and each maps to a distinct fail-closed guard refusal.
+
+Reversibility is trusted configuration, recorded on the executed audit event and never read from a
+proposal. A model claiming an operation is reversible cannot change how the runtime treats it.
+
+*Status: implemented.*
+
+### AD-49 — No silent retry of a destructive operation
+
+The backend keeps a ledger keyed by action identifier. A completed revoke or modify returns its
+recorded change on replay, so a retried resume is exactly-once. An operation whose first attempt
+did not confirm completion is left marked attempted with no recorded change, and a replay of it is
+refused rather than re-driven — a second irreversible side effect is never performed on an
+uncertain outcome (project.md 13.6). This is deterministic idempotency at one boundary, not a
+distributed exactly-once guarantee, and no such guarantee is claimed.
+
+One consequence is deliberate and is a weaker property than the grant path has: the executed audit
+event for a destructive operation is written **after** the backend confirms the change, not before
+it, because an event claiming execution must not precede an outcome the backend may still refuse as
+uncertain. A grant, which is safely re-drivable, keeps its fail-closed audit-before-effect ordering
+(AD-45). For a destructive operation the audit-before-effect guarantee is therefore not held; if
+the recording boundary fails after a confirmed change, the change stands and is re-recorded
+idempotently on a later replay. This is a known limitation, consistent with the trail not yet being
+durable.
+
+*Status: implemented.*
+
 ## 4. Pause and resume semantics
 
 This is the most consequential runtime behaviour in the system and is treated as a hard
@@ -539,3 +601,11 @@ model behaves is not a control.
   model quality precisely because of this.
 - The evaluation and ablation work needed to make the central claim measurable is not built
   yet.
+- A destructive operation records its executed audit event after the backend confirms the change
+  rather than before it (AD-49), so the fail-closed audit-before-effect ordering the grant path
+  has is not held for revoke and modify. A confirmed change whose audit write then fails stands
+  and is re-recorded idempotently on replay. This is bounded by the same non-durable-trail
+  limitation above.
+- Current access is modelled as backend state seeded by grants performed in-process; it is not a
+  connection to a real identity provider, and use-time enforcement of a permission is still not
+  built (AD-44).

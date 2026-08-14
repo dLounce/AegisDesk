@@ -97,6 +97,11 @@ class Capability(Enum):
     TICKET_SET_STATUS = "ticket.set_status"
     DIRECTORY_READ_SELF = "directory.read_self"
     ACCESS_PROPOSE_GRANT = "access.propose_grant"
+    # Revoke and modify are destructive, so each carries its own propose-side capability rather
+    # than reusing the grant one. Least privilege is stated per operation, and the binding an
+    # agent holds still only permits proposing — never executing (S10).
+    ACCESS_PROPOSE_REVOKE = "access.propose_revoke"
+    ACCESS_PROPOSE_MODIFY = "access.propose_modify"
 
 
 # What the runtime executes once an authoritative approval exists. Deliberately a separate
@@ -104,6 +109,16 @@ class Capability(Enum):
 # execution.
 class ProtectedOperation(Enum):
     GRANT_ACCESS = "grant_access"
+    REVOKE_ACCESS = "revoke_access"
+    MODIFY_PERMISSIONS = "modify_permissions"
+
+
+# Whether an operation's effect can be undone, supplied as trusted configuration in the way the
+# risk-tier corpus is. It is never read from a proposal: a model claiming an operation is
+# reversible must not be able to soften how the runtime treats it (S10 decision 6).
+class Reversibility(Enum):
+    REVERSIBLE = "reversible"
+    IRREVERSIBLE = "irreversible"
 
 
 class TicketStatus(Enum):
@@ -129,6 +144,11 @@ class PolicyReason(Enum):
     UNKNOWN_RESOURCE = "unknown_resource"
     REQUESTER_INACTIVE = "requester_inactive"
     EVALUATION_ERROR = "evaluation_error"
+    # Revoke and modify never resolve automatically: a destructive change always reaches a human,
+    # whatever baseline access the requester already holds (S10 decision 7). Two reasons rather
+    # than one so an audit line tells a revocation from a permission change.
+    REVOKE_REQUIRES_APPROVAL = "revoke_requires_approval"
+    MODIFY_REQUIRES_APPROVAL = "modify_requires_approval"
 
 
 # APPROVED is deliberately not the first member, so that any code reaching for a positional
@@ -183,6 +203,16 @@ class GuardRefusalReason(Enum):
     DECISION_TUPLE_MISMATCH = "decision_tuple_mismatch"
     REVIEWER_NOT_ELIGIBLE = "reviewer_not_eligible"
     EXPIRED_GRANT_REPLAY = "expired_grant_replay"
+    # The destructive-operation preconditions, re-checked against authoritative current access
+    # before execution. Revoke removes a named permission and so requires that exact permission to
+    # be the one currently held; modify changes an existing permission and so requires one to
+    # exist. Both fail closed (S10 decisions 3, 8).
+    CURRENT_ACCESS_MISMATCH = "current_access_mismatch"
+    NO_CURRENT_ACCESS = "no_current_access"
+    # A destructive operation whose first attempt did not confirm completion. It is refused rather
+    # than retried, so no second irreversible side effect is performed on an uncertain outcome
+    # (project.md 13.6; S10 decision 9).
+    UNCERTAIN_DESTRUCTIVE_REPLAY = "uncertain_destructive_replay"
 
 
 # What an append-only audit entry records. The trajectory events a protected action passes
@@ -215,3 +245,13 @@ class ApprovalRefusalReason(Enum):
 # requires the policy to define tiers and 9.1 requires the tier on a decision, but no section
 # states a mapping, so the shape is declared here and the values live in seed configuration.
 RiskTierConfiguration = Mapping[tuple[ResourceClass, Permission, AccessDuration], RiskTier]
+
+# Risk for revoke and modify. They carry no duration, so their tier is keyed on the operation,
+# the resource class and the permission — the fields that are semantically applicable — rather
+# than forced through the grant-only key above (S10 decision 5).
+OperationRiskTierConfiguration = Mapping[
+    tuple[ProtectedOperation, ResourceClass, Permission], RiskTier
+]
+
+# Reversibility of each protected operation, sourced from trusted configuration.
+ReversibilityConfiguration = Mapping[ProtectedOperation, Reversibility]

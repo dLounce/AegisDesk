@@ -91,7 +91,11 @@ def test_capability_and_protected_operation_are_disjoint() -> None:
 
 def test_no_capability_denotes_execution_of_a_protected_operation() -> None:
     access_capabilities = {c for c in Capability if c.value.startswith("access.")}
-    assert access_capabilities == {Capability.ACCESS_PROPOSE_GRANT}
+    assert access_capabilities == {
+        Capability.ACCESS_PROPOSE_GRANT,
+        Capability.ACCESS_PROPOSE_REVOKE,
+        Capability.ACCESS_PROPOSE_MODIFY,
+    }
     assert all("propose" in c.value for c in access_capabilities)
 
 

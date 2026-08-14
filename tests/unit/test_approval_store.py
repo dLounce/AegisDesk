@@ -75,6 +75,7 @@ def _decision(resolved: ResolvedAction, **overrides: Any) -> PolicyDecision:
         "policy_version": POLICY_VERSION,
         "effect": PolicyEffect.REQUIRE_APPROVAL,
         "reason": PolicyReason.PRIVILEGED_RESOURCE,
+        "operation": resolved.operation,
         "workflow_id": resolved.workflow_id,
         "action_id": action_id,
         "evaluated_at": AT,

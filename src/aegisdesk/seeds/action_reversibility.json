@@ -1,0 +1,14 @@
+[
+  {
+    "operation": "grant_access",
+    "reversibility": "reversible"
+  },
+  {
+    "operation": "revoke_access",
+    "reversibility": "irreversible"
+  },
+  {
+    "operation": "modify_permissions",
+    "reversibility": "irreversible"
+  }
+]

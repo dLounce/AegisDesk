@@ -12,8 +12,12 @@ from aegisdesk.backends.kb import KbDocument
 from aegisdesk.domain.employee import Employee
 from aegisdesk.domain.enums import (
     AccessDuration,
+    OperationRiskTierConfiguration,
     Permission,
+    ProtectedOperation,
     ResourceClass,
+    Reversibility,
+    ReversibilityConfiguration,
     RiskTier,
     RiskTierConfiguration,
 )
@@ -148,6 +152,69 @@ def load_risk_tiers() -> RiskTierConfiguration:
     if missing:
         raise DomainInvariantError(f"risk tier corpus does not cover: {sorted(missing)}")
     return tiers
+
+
+# Risk for the destructive operations, keyed on the operation, the resource class and the
+# permission. They carry no duration, so the grant corpus above cannot classify them; this
+# corpus states one triple at a time in the same way, and the guard still records the tier
+# without consulting it (S10 decision 5).
+class _OperationRiskTierRow(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation: ProtectedOperation
+    resource_class: ResourceClass
+    permission: Permission
+    risk_tier: RiskTier
+
+
+_DESTRUCTIVE_OPERATIONS = (
+    ProtectedOperation.REVOKE_ACCESS,
+    ProtectedOperation.MODIFY_PERMISSIONS,
+)
+
+
+def load_operation_risk_tiers() -> OperationRiskTierConfiguration:
+    rows = _read_json("operation_risk_tiers.json")
+    parsed = [_OperationRiskTierRow.model_validate(row) for row in rows]
+    tiers = {(row.operation, row.resource_class, row.permission): row.risk_tier for row in parsed}
+    if len(tiers) != len(parsed):
+        raise DomainInvariantError("duplicate operation risk tier key in seed data")
+
+    # An absent triple would leave the guard with no tier for a destructive request it can
+    # otherwise resolve, which it refuses; catching it here makes the gap visible at start-up.
+    every_triple = product(_DESTRUCTIVE_OPERATIONS, ResourceClass, Permission)
+    missing = [
+        f"{operation.value}/{resource_class.value}/{permission.value}"
+        for operation, resource_class, permission in every_triple
+        if (operation, resource_class, permission) not in tiers
+    ]
+    if missing:
+        raise DomainInvariantError(f"operation risk tier corpus does not cover: {sorted(missing)}")
+    return tiers
+
+
+# Whether each protected operation's effect can be undone, stated as trusted configuration. It is
+# recorded on the executed audit event and never accepted from a proposal, so a model claiming an
+# operation is reversible cannot change how the runtime treats it (S10 decision 6).
+class _ReversibilityRow(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation: ProtectedOperation
+    reversibility: Reversibility
+
+
+def load_action_reversibility() -> ReversibilityConfiguration:
+    rows = _read_json("action_reversibility.json")
+    parsed = [_ReversibilityRow.model_validate(row) for row in rows]
+    reversibility = {row.operation: row.reversibility for row in parsed}
+    if len(reversibility) != len(parsed):
+        raise DomainInvariantError("duplicate operation in reversibility seed data")
+    missing = [
+        operation.value for operation in ProtectedOperation if operation not in reversibility
+    ]
+    if missing:
+        raise DomainInvariantError(f"reversibility corpus does not cover: {sorted(missing)}")
+    return reversibility
 
 
 # Who may decide an approval, stated one identifier at a time. project.md names reviewers but

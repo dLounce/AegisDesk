@@ -9,6 +9,7 @@ from aegisdesk.domain.enums import (
     Permission,
     PolicyEffect,
     PolicyReason,
+    ProtectedOperation,
     ResourceClass,
     RiskTier,
 )
@@ -34,12 +35,17 @@ class PolicyRequest(BaseModel):
     action_id: ActionId
     evaluated_at: AwareDatetime
 
+    # Which protected operation is being evaluated. Grant resolves within baseline; revoke and
+    # modify never resolve automatically. The engine reads it rather than inferring intent from
+    # the other fields.
+    operation: ProtectedOperation
     requester: Employee
     # None when the requested identifier did not resolve to a catalogue entry. Resolving it
     # belongs to the caller because a lookup is I/O.
     resource: Resource | None
     permission: Permission
-    duration: AccessDuration
+    # Present for a grant, absent for the destructive operations, which have no duration.
+    duration: AccessDuration | None
 
     # Authoritative baseline access for this requester on this resource, read from the
     # directory (project.md 10.3 lists "baseline access" as authoritative employee context),
@@ -53,6 +59,17 @@ class PolicyRequest(BaseModel):
     # It must come from trusted configuration; a tier a model chose would reach a reviewer.
     risk_tier: RiskTier
 
+    @model_validator(mode="after")
+    def _duration_matches_operation(self) -> Self:
+        is_grant = self.operation is ProtectedOperation.GRANT_ACCESS
+        if is_grant and self.duration is None:
+            raise DomainInvariantError("a grant request must carry a duration")
+        if not is_grant and self.duration is not None:
+            raise DomainInvariantError(
+                f"a {self.operation.value} request must not carry a duration"
+            )
+        return self
+
 
 class PolicyDecision(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -60,6 +77,9 @@ class PolicyDecision(BaseModel):
     policy_version: PolicyVersion
     effect: PolicyEffect
     reason: PolicyReason
+    # The requested operation (project.md 9.1 lists the requested action on the decision). Absent
+    # only for an EVALUATION_ERROR, which could not read the request at all.
+    operation: ProtectedOperation | None
 
     # project.md 9.1 enumerates what an auditable decision object contains: policy version,
     # requester, resource, requested action, risk tier, decision, reason, timestamp, and
@@ -80,20 +100,30 @@ class PolicyDecision(BaseModel):
 
     @model_validator(mode="after")
     def _record_agrees_with_reason(self) -> Self:
+        # duration is required only for a grant: a revoke or a modify is a readable decision that
+        # legitimately carries none, so it is checked against the operation rather than listed
+        # among the always-required fields.
         required = (
             self.workflow_id,
             self.action_id,
             self.evaluated_at,
+            self.operation,
             self.requester_id,
             self.permission,
-            self.duration,
             self.risk_tier,
         )
         if self.reason is PolicyReason.EVALUATION_ERROR:
-            if any(field is not None for field in (*required, self.resource_id)):
+            echoed = (*required, self.resource_id, self.duration)
+            if any(field is not None for field in echoed):
                 raise DomainInvariantError("an EVALUATION_ERROR decision must not echo its request")
-        elif any(field is None for field in required):
+            return self
+        if any(field is None for field in required):
             raise DomainInvariantError("a readable decision must carry every required field")
+        is_grant = self.operation is ProtectedOperation.GRANT_ACCESS
+        if is_grant and self.duration is None:
+            raise DomainInvariantError("a readable grant decision must carry a duration")
+        if not is_grant and self.duration is not None:
+            raise DomainInvariantError("a destructive decision must not carry a duration")
         return self
 
 
@@ -101,6 +131,7 @@ _UNREADABLE_REQUEST: Final[PolicyDecision] = PolicyDecision(
     policy_version=POLICY_VERSION,
     effect=PolicyEffect.DENY,
     reason=PolicyReason.EVALUATION_ERROR,
+    operation=None,
     workflow_id=None,
     action_id=None,
     evaluated_at=None,
@@ -149,6 +180,15 @@ def _classify(request: PolicyRequest) -> tuple[PolicyEffect, PolicyReason]:
     if not request.requester.is_active:
         return PolicyEffect.DENY, PolicyReason.REQUESTER_INACTIVE
 
+    # Destructive operations never resolve automatically. A revoke or a modify always reaches a
+    # human, whatever baseline the requester holds, so it is decided here — after the deny checks
+    # above, which still apply — before the grant-only baseline logic below. No narrowing or
+    # reversible case is auto-allowed in S10 (decision 7).
+    if request.operation is ProtectedOperation.REVOKE_ACCESS:
+        return PolicyEffect.REQUIRE_APPROVAL, PolicyReason.REVOKE_REQUIRES_APPROVAL
+    if request.operation is ProtectedOperation.MODIFY_PERMISSIONS:
+        return PolicyEffect.REQUIRE_APPROVAL, PolicyReason.MODIFY_REQUIRES_APPROVAL
+
     # The one place the engine overrides its input: privileged access never resolves
     # automatically, whatever baseline it was handed. project.md 9.1 works exactly this case
     # through — engineer, prod-db, admin, permanent, REQUIRE_HUMAN_APPROVAL — and 8.3 gives
@@ -173,6 +213,7 @@ def _decide(effect: PolicyEffect, reason: PolicyReason, request: PolicyRequest) 
         policy_version=POLICY_VERSION,
         effect=effect,
         reason=reason,
+        operation=request.operation,
         workflow_id=request.workflow_id,
         action_id=request.action_id,
         evaluated_at=request.evaluated_at,

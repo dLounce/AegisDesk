@@ -8,7 +8,13 @@ from aegisdesk.domain.errors import DomainInvariantError
 # reach and 8.3 gives proposing privileged work to Escalation; both are stated, so both are
 # encoded. Membership here is what the Resolver invariant below is checked against, which
 # means a capability added to this set later is refused for the Resolver by construction.
-PRIVILEGED_CAPABILITIES: Final[frozenset[Capability]] = frozenset({Capability.ACCESS_PROPOSE_GRANT})
+PRIVILEGED_CAPABILITIES: Final[frozenset[Capability]] = frozenset(
+    {
+        Capability.ACCESS_PROPOSE_GRANT,
+        Capability.ACCESS_PROPOSE_REVOKE,
+        Capability.ACCESS_PROPOSE_MODIFY,
+    }
+)
 
 # Only the grants the governing documents state. Nothing is inferred from an agent's prose
 # responsibilities: an unlisted capability is refused and an unlisted agent is refused, so a
@@ -18,7 +24,13 @@ PRIVILEGED_CAPABILITIES: Final[frozenset[Capability]] = frozenset({Capability.AC
 AGENT_CAPABILITIES: Final[Mapping[AgentName, frozenset[Capability]]] = {
     AgentName.ROUTER: frozenset(),
     AgentName.RESOLVER: frozenset(),
-    AgentName.ESCALATION: frozenset({Capability.ACCESS_PROPOSE_GRANT}),
+    AgentName.ESCALATION: frozenset(
+        {
+            Capability.ACCESS_PROPOSE_GRANT,
+            Capability.ACCESS_PROPOSE_REVOKE,
+            Capability.ACCESS_PROPOSE_MODIFY,
+        }
+    ),
 }
 
 # Which capability a proposal of each protected operation requires. The two enums stay
@@ -28,6 +40,8 @@ AGENT_CAPABILITIES: Final[Mapping[AgentName, frozenset[Capability]]] = {
 # position for an operation added to the enum before its binding is decided.
 REQUIRED_CAPABILITY: Final[Mapping[ProtectedOperation, Capability]] = {
     ProtectedOperation.GRANT_ACCESS: Capability.ACCESS_PROPOSE_GRANT,
+    ProtectedOperation.REVOKE_ACCESS: Capability.ACCESS_PROPOSE_REVOKE,
+    ProtectedOperation.MODIFY_PERMISSIONS: Capability.ACCESS_PROPOSE_MODIFY,
 }
 
 

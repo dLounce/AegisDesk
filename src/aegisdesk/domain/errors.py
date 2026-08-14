@@ -52,6 +52,24 @@ class ProtectedExecutionError(AegisDeskError):
     pass
 
 
+# The destructive-operation preconditions, enforced by the access backend against its own
+# authoritative current-access state. Distinct classes so the guard can map each to a distinct
+# refusal reason for the audit trail while the caller still meets one generic guard message.
+class CurrentAccessMismatchError(ProtectedExecutionError):
+    pass
+
+
+class NoCurrentAccessError(ProtectedExecutionError):
+    pass
+
+
+# Raised when a destructive operation is replayed while its first attempt has not confirmed
+# completion. The backend refuses rather than performing a second irreversible side effect on an
+# uncertain outcome; the guard turns this into a fail-closed refusal.
+class UncertainDestructiveReplayError(ProtectedExecutionError):
+    pass
+
+
 # Raised for every refused reviewer decision, with one message for all of them. The precise
 # cause travels on `reason`, which is bound for the audit trail rather than for a caller
 # comparing replies.

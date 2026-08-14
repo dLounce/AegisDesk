@@ -11,6 +11,7 @@ from aegisdesk.domain.enums import (
     Permission,
     PolicyEffect,
     PolicyReason,
+    ProtectedOperation,
     ResourceClass,
     RiskTier,
 )
@@ -158,6 +159,7 @@ def test_policy_still_refuses_an_authenticated_inactive_requester(
             workflow_id=WorkflowId("WF-0001"),
             action_id=ActionId("ACT-0001"),
             evaluated_at=AT,
+            operation=ProtectedOperation.GRANT_ACCESS,
             requester=requester,
             resource=Resource(
                 resource_id=ResourceId("wiki"),
