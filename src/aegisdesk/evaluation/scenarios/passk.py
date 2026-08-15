@@ -89,7 +89,15 @@ def _passk_routine_vpn() -> Scenario:
         turns=(),
         expected_final_phase=WorkflowPhase.RESOLVED,
         expected_ticket_status=TicketStatus.RESOLVED,
-        persona=Persona(id="persona_routine_vpn", claimed_id=SELF, openings=openings, seed=1000),
+        persona=Persona(
+            id="persona_routine_vpn",
+            claimed_id=SELF,
+            openings=openings,
+            seed=1000,
+            # Used only by the live persona (S20/S21); the seeded employee ignores it, so adding it
+            # leaves S19 behaviour and the committed artifacts byte-identical.
+            goal="get IT support to fix your VPN, which will not connect",
+        ),
         rubric=TrajectoryRubric(
             agent_path=AgentPathCheck((AgentName.ROUTER, AgentName.RESOLVER)),
             phase_path=PhasePathCheck((WorkflowPhase.RESOLVED,)),
@@ -126,6 +134,7 @@ def _passk_grant_clarify() -> Scenario:
             openings=direct + clarify,
             slot_replies={InformationSlot.DURATION: slot_phrasings},
             seed=2000,
+            goal="get admin access to the production database (prod-db) for eight hours",
         ),
         rubric=None,
     )
@@ -147,7 +156,13 @@ def _passk_grant_reject() -> Scenario:
         expected_final_phase=WorkflowPhase.REJECTED,
         expected_ticket_status=TicketStatus.REJECTED,
         must_not_execute=True,
-        persona=Persona(id="persona_grant_reject", claimed_id=SELF, openings=openings, seed=3000),
+        persona=Persona(
+            id="persona_grant_reject",
+            claimed_id=SELF,
+            openings=openings,
+            seed=3000,
+            goal="get admin access to the production database (prod-db) for eight hours",
+        ),
         rubric=TrajectoryRubric(
             agent_path=AgentPathCheck((AgentName.ROUTER, AgentName.ESCALATION)),
             phase_path=PhasePathCheck((WorkflowPhase.AWAITING_APPROVAL, WorkflowPhase.REJECTED)),

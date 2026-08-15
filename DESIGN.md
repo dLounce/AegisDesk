@@ -814,6 +814,59 @@ metrics; factory fails closed on incomplete config; independent config with nonz
 temperature; fresh stateless client per trial) plus one gated live smoke test. Full offline suite
 966 pass; scripted corpus and committed baseline/passk artifacts byte-identical and unchanged.*
 
+### AD-58 — Live pass^k measures reliability with both models live; security stays authoritative
+
+S21 runs the S19 pass^k corpus with **both** the simulated employee and the SUT agent model backed by
+real providers (`evaluation/passk_live.py`). The design forcing function is that a `ScriptedModel`
+keys on exact message strings and cannot classify a live employee's free-form text, so a meaningful
+live reliability measurement requires the agent model to be live too. Both models are untrusted; the
+experiment's headline claim is that the deterministic authorization boundary holds under a fully
+stochastic, untrusted model pipeline.
+
+*Composition, not new mechanism.* The module only wires the existing seams: `ScenarioRunner`'s
+`model_factory` returns a fresh `LiveModel` per trial and its `employee_factory` a fresh
+`LivePersonaEmployee` per trial, both fed to the unchanged `run_passk`. Each trial still builds a
+brand-new `Harness` (fresh guard/access/approval/audit/directory/tickets), so no control-plane state
+crosses trials (agent-security F5). Neither factory receives a guard/access/approval/session/minting/
+reviewer/policy handle — only the scenario's `script`/`persona` data. `runner.py`, `passk.py`,
+`report.py`, `persona.py`, and `live_persona.py` are untouched, as are the deterministic
+`__main__.py`/`passk.py` entrypoints and their committed `baseline.json`/`passk.json`. The corpus is
+reused unchanged except that each persona now carries a natural-language `goal` (the live employee's
+task contract); the seeded employee ignores `goal` and it is unserialized, so S19 stays
+byte-identical (verified).
+
+*Security is strict and un-averaged.* Per-trial security flags come from authoritative ledger/approval/
+audit state, and pass^k aggregates them as **any-fail counts** — one unauthorized execution or policy
+bypass in one trial fails the corresponding result regardless of the other trials. A live agent model
+does not weaken this: its output is re-validated against enums and re-authorized by the guard, and its
+`approve`/`claimed_employee_id` fields are ignored, exactly as for a scripted model. The live employee
+still emits only `(claimed_id, message) | None`.
+
+*Spend control and determinism boundary.* A single `CallBudget` is shared by both models' transports
+via `_BudgetedChatClient`, charged before each provider call; exhausting it raises inside the
+transport, where `LiveModel`/`LivePersonaEmployee` already fail closed — so the ceiling caps actual
+spend and degrades to safe scenario failures, never an execution. The full manual run is 3 scenarios ×
+K=3 under an ~80-call default budget; the automated `pytest.mark.live` smoke is exactly one scenario ×
+K=1 and is skipped unless both providers are configured. Live diagnostics (per-trial security flags,
+SUT telemetry, employee telemetry reported separately, full transcripts) are written **outside the
+repository** by default and the writer refuses any `evaluation/results` or `baseline.json`/`passk.json`
+path; live output is never committed, and `require_live()` gates both configs before any network
+object is built.
+
+*Regression capture is deterministic and human-reviewed.* A failing live trial can be reproduced by
+`capture_trial`, which re-runs one scenario through a recording SUT model to capture the exact
+`(agent, message) → ModelResponse` mapping, and `render_scenario_source`, which emits a
+ScriptedModel-backed scenario as source text for a person to review before adding it to the offline
+corpus. Nothing is auto-committed.
+
+*Status: implemented and tested — 11 new offline tests (budget charge/fail-closed, no call past the
+ceiling, employee-over-budget safe-empty, fresh employee instances + telemetry retention, committed-
+path rejection, require-live fail-closed, end-to-end offline routine reliable+secure, per-trial
+security flags preserved in diagnostics, seeded-vs-live comparison shape, recording-model capture,
+capture→freeze deterministic reproduction) plus one gated live smoke (1 scenario × K=1). Full offline
+suite green; committed baseline/passk artifacts byte-identical and unchanged. A live run is manual,
+non-deterministic, uncommitted.*
+
 ## 4. Pause and resume semantics
 
 This is the most consequential runtime behaviour in the system and is treated as a hard
