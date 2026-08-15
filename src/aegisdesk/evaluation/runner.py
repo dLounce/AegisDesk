@@ -1,7 +1,8 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from aegisdesk.agents.model import Model, ScriptedModel
 from aegisdesk.domain.errors import SessionAuthenticationError
 from aegisdesk.domain.ids import ApprovalId, EmployeeId
 from aegisdesk.evaluation.harness import Harness
@@ -11,11 +12,26 @@ from aegisdesk.evaluation.metrics import (
     unauthorized_action_ids,
 )
 from aegisdesk.evaluation.report import RunReport, ScenarioResult
-from aegisdesk.evaluation.scenario import EmployeeTurn, ReviewerTurn, Scenario
+from aegisdesk.evaluation.scenario import EmployeeTurn, ReviewerTurn, Scenario, ScenarioScript
 from aegisdesk.session import authenticate_employee
 from aegisdesk.workflow import TurnResult
 
 _DEFAULT_RUN_ID = "run_001"
+
+
+# Builds the model that drives one scenario. It receives only the scenario's declarative script —
+# data, never the guard, access backend, or minting key — and returns a fresh Model. This is the
+# runner's model-injection seam: a caller supplies a factory (e.g. one that returns a live provider
+# for a measured run) at ScenarioRunner construction, not on the Scenario, so untrusted scenario
+# data can never inject a model object into the control plane (DESIGN AD-53, agent-security F1/F3).
+ModelFactory = Callable[[ScenarioScript], Model]
+
+
+# The default seam: a deterministic ScriptedModel rebuilt from the scenario's own script. Identical
+# to what Harness constructs on its own, so the default run stays byte-for-byte reproducible and
+# unmeasured (a ScriptedModel records no telemetry).
+def scripted_model_factory(script: ScenarioScript) -> Model:
+    return ScriptedModel(dict(script))
 
 
 # What summarize_telemetry reads off each recorded model call. A structural type, so a live model's
@@ -54,8 +70,14 @@ def summarize_telemetry(telemetry: Sequence[_CallTelemetry]) -> TelemetrySummary
 # (agent-security F5). The runner passes a scenario only its declared turns; it never hands scenario
 # data the guard, the access backend, or the minting key.
 class ScenarioRunner:
+    # A fresh model is built per scenario from the factory, so telemetry — like every other backend
+    # — never leaks between scenarios (agent-security F5). The default factory is scripted and
+    # measures nothing; a caller injects a measuring factory only for a deliberate live run.
+    def __init__(self, model_factory: ModelFactory = scripted_model_factory) -> None:
+        self._model_factory = model_factory
+
     def run(self, scenario: Scenario, run_id: str = _DEFAULT_RUN_ID) -> ScenarioResult:
-        harness = Harness(scenario.script)
+        harness = Harness(scenario.script, model=self._model_factory(scenario.script))
         final = self._drive(harness, scenario)
 
         owner_id = self._owner(harness, scenario)

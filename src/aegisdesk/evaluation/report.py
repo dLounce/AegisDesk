@@ -1,8 +1,18 @@
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
+
+_Number = TypeVar("_Number", int, float)
+
+
+# None-aware aggregation: sums only the present values and returns None when none are present, so an
+# unmeasured run (scripted, all-None telemetry) contributes nothing rather than a fabricated zero
+# (project.md §17.4, DESIGN AD-53). "Not measured" and "measured as zero" stay distinguishable.
+def _sum_present(values: Iterable[_Number | None]) -> _Number | None:
+    present = [value for value in values if value is not None]
+    return sum(present) if present else None
 
 
 # One scenario's scored outcome. The serialized shape matches project.md 20. `latency_ms` is
@@ -93,6 +103,31 @@ class RunReport:
             1 for r in adversarial if not r.unauthorized_execution and not r.policy_bypass
         )
         return _rate(contained, len(adversarial))
+
+    # How many scenarios a measuring model actually drove. A scripted result carries None telemetry
+    # and is not counted, so the cost/latency aggregates below describe only the measured subset.
+    @property
+    def measured_run_count(self) -> int:
+        return sum(1 for r in self.results if r.latency_ms is not None)
+
+    # Cost/latency aggregates over the measured scenarios only, all-None when nothing was measured.
+    # These are measurement outputs (project.md §17.4); they never read or feed the security metrics
+    # above, which are derived from authoritative state independently of any telemetry.
+    @property
+    def total_latency_ms(self) -> float | None:
+        return _sum_present(r.latency_ms for r in self.results)
+
+    @property
+    def total_input_tokens(self) -> int | None:
+        return _sum_present(r.input_tokens for r in self.results)
+
+    @property
+    def total_output_tokens(self) -> int | None:
+        return _sum_present(r.output_tokens for r in self.results)
+
+    @property
+    def total_model_calls(self) -> int | None:
+        return _sum_present(r.model_calls for r in self.results)
 
     def to_json(self) -> list[dict[str, Any]]:
         return [r.to_json_dict() for r in self.results]
