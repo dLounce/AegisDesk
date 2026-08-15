@@ -1,3 +1,4 @@
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -13,6 +14,13 @@ from aegisdesk.evaluation.metrics import (
     task_success,
     unauthorized_action_ids,
 )
+from aegisdesk.evaluation.persona import (
+    EmployeeObservation,
+    Persona,
+    SeededPersonaEmployee,
+    SimulatedEmployee,
+    TranscriptEntry,
+)
 from aegisdesk.evaluation.report import RunReport, ScenarioResult
 from aegisdesk.evaluation.scenario import EmployeeTurn, ReviewerTurn, Scenario, ScenarioScript
 from aegisdesk.evaluation.trajectory import ObservedTrajectory, score_trajectory
@@ -20,6 +28,29 @@ from aegisdesk.session import authenticate_employee
 from aegisdesk.workflow import TurnResult
 
 _DEFAULT_RUN_ID = "run_001"
+
+# The phases at which a workflow has finished and a simulated conversation has nothing left to do.
+_TERMINAL_PHASES = frozenset(
+    {
+        WorkflowPhase.RESOLVED,
+        WorkflowPhase.EXECUTED,
+        WorkflowPhase.REJECTED,
+        WorkflowPhase.REFUSED,
+    }
+)
+
+# A hard ceiling on simulated employee/reviewer exchanges per scenario. The workflow already fails
+# closed on its own (bounded clarification_rounds -> REFUSED), so this is a belt-and-suspenders
+# runner-level bound that guarantees termination even against a persona that never cooperates
+# (agent-security F4: no runaway loop).
+_MAX_SIMULATED_STEPS = 8
+
+# Builds the simulated employee that drives one persona scenario. It receives only the scenario's
+# declarative Persona — data, never a control-plane handle — and returns a fresh SimulatedEmployee.
+# This mirrors ModelFactory: the driver is constructed by the runner from data, so untrusted
+# scenario data can never inject a live employee object into the control plane. The default is the
+# deterministic SeededPersonaEmployee; a live persona driver is a later milestone (S19).
+EmployeeFactory = Callable[[Persona], SimulatedEmployee]
 
 
 # Records the ordered sequence of agents the Supervisor invoked, for golden-trajectory scoring. It
@@ -96,17 +127,34 @@ class ScenarioRunner:
     # A fresh model is built per scenario from the factory, so telemetry — like every other backend
     # — never leaks between scenarios (agent-security F5). The default factory is scripted and
     # measures nothing; a caller injects a measuring factory only for a deliberate live run.
-    def __init__(self, model_factory: ModelFactory = scripted_model_factory) -> None:
+    def __init__(
+        self,
+        model_factory: ModelFactory = scripted_model_factory,
+        employee_factory: EmployeeFactory = SeededPersonaEmployee,
+    ) -> None:
         self._model_factory = model_factory
+        # Like the model factory, built fresh per scenario so a persona's driver state (its seeded
+        # RNG) never leaks between scenarios (agent-security F5).
+        self._employee_factory = employee_factory
 
     def run(self, scenario: Scenario, run_id: str = _DEFAULT_RUN_ID) -> ScenarioResult:
         # A fresh recorder per scenario wraps the fresh model, so the observed agent path — like
         # every backend — never leaks between scenarios.
         recorder = _AgentPathRecorder(self._model_factory(scenario.script))
         harness = Harness(scenario.script, model=recorder)
-        final, phases = self._drive(harness, scenario)
 
-        owner_id = self._owner(harness, scenario)
+        transcript: tuple[TranscriptEntry, ...] = ()
+        if scenario.persona is not None:
+            employee = self._employee_factory(scenario.persona)
+            final, phases, transcript = self._drive_persona(harness, scenario, employee)
+            opening_claimed_id = scenario.persona.claimed_id
+        else:
+            final, phases = self._drive(harness, scenario)
+            opener = scenario.turns[0]
+            assert isinstance(opener, EmployeeTurn)  # guaranteed by Scenario.__post_init__
+            opening_claimed_id = opener.claimed_id
+
+        owner_id = self._owner(harness, opening_claimed_id)
         succeeded = task_success(
             final,
             scenario.expected_final_phase,
@@ -154,6 +202,9 @@ class ScenarioRunner:
             input_tokens=metrics.input_tokens,
             output_tokens=metrics.output_tokens,
             model_calls=metrics.model_calls,
+            simulated=scenario.persona is not None,
+            persona_id=scenario.persona.id if scenario.persona is not None else None,
+            transcript=transcript,
         )
 
     def run_all(self, scenarios: Sequence[Scenario], run_id: str = _DEFAULT_RUN_ID) -> RunReport:
@@ -188,14 +239,63 @@ class ScenarioRunner:
             harness.reviewer(turn.reviewer_id), pending_approval, turn.decision
         )
 
-    def _owner(self, harness: Harness, scenario: Scenario) -> EmployeeId | None:
-        # The workflow owner is the first employee turn's authenticated identity, used only to read
-        # the ticket's authoritative status under its owner scoping. An unresolved claim leaves the
+    def _drive_persona(
+        self, harness: Harness, scenario: Scenario, employee: SimulatedEmployee
+    ) -> tuple[TurnResult, tuple[WorkflowPhase, ...], tuple[TranscriptEntry, ...]]:
+        # The employee side is generated by the persona; reviewer turns stay scripted and trusted
+        # (a simulated reviewer is out of scope), consumed in order when the workflow pauses for
+        # approval. The runner never hands the employee a control-plane handle: it passes only an
+        # EmployeeObservation (phase + missing slots, no agent prose) and replays the returned
+        # (claimed_id, message) through the real Supervisor as untrusted input.
+        reviewer_turns = deque(t for t in scenario.turns if isinstance(t, ReviewerTurn))
+        phases: list[WorkflowPhase] = []
+        transcript: list[TranscriptEntry] = []
+        pending_approval: ApprovalId | None = None
+
+        claimed_id, message = employee.opening()
+        final = harness.sup.handle(claimed_id, message, scenario.workflow_id)
+        transcript.append(TranscriptEntry("employee", claimed_id, message))
+        phases.append(final.phase)
+        if final.approval_id is not None:
+            pending_approval = final.approval_id
+
+        steps = 1
+        while steps < _MAX_SIMULATED_STEPS and final.phase not in _TERMINAL_PHASES:
+            if final.phase is WorkflowPhase.AWAITING_INFO:
+                observation = EmployeeObservation(
+                    phase=final.phase, missing_information=final.missing_information
+                )
+                nxt = employee.reply(observation)
+                if nxt is None:
+                    break
+                claimed_id, message = nxt
+                final = harness.sup.handle(claimed_id, message, scenario.workflow_id)
+                transcript.append(TranscriptEntry("employee", claimed_id, message))
+            elif final.phase is WorkflowPhase.AWAITING_APPROVAL:
+                if pending_approval is None or not reviewer_turns:
+                    break
+                turn = reviewer_turns.popleft()
+                final = harness.sup.decide(
+                    harness.reviewer(turn.reviewer_id), pending_approval, turn.decision
+                )
+                transcript.append(
+                    TranscriptEntry("reviewer", turn.reviewer_id, turn.decision.value)
+                )
+            else:
+                break
+            if final.approval_id is not None:
+                pending_approval = final.approval_id
+            phases.append(final.phase)
+            steps += 1
+
+        return final, tuple(phases), tuple(transcript)
+
+    def _owner(self, harness: Harness, claimed_id: str) -> EmployeeId | None:
+        # The workflow owner is the opening turn's authenticated identity, used only to read the
+        # ticket's authoritative status under its owner scoping. An unresolved claim leaves the
         # owner unknown and the ticket-status check is skipped rather than guessed.
-        opener = scenario.turns[0]
-        assert isinstance(opener, EmployeeTurn)  # guaranteed by Scenario.__post_init__
         try:
-            session = authenticate_employee(opener.claimed_id, harness.directory, harness.clock())
+            session = authenticate_employee(claimed_id, harness.directory, harness.clock())
         except SessionAuthenticationError:
             return None
         return session.employee_id

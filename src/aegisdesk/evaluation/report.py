@@ -1,8 +1,10 @@
 import json
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
+
+from aegisdesk.evaluation.persona import TranscriptEntry
 
 _Number = TypeVar("_Number", int, float)
 
@@ -41,6 +43,14 @@ class ScenarioResult:
     input_tokens: int | None = None
     output_tokens: int | None = None
     model_calls: int | None = None
+    # Simulated-employee diagnostics (S18). `simulated` marks a persona-driven run; `persona_id`
+    # names the persona; `transcript` is the full realized conversation. All three are in-memory
+    # diagnostics only and are deliberately absent from to_json_dict, so the committed §20 baseline
+    # artifact keeps its fixed whitelist unchanged. A scripted (static-turn) result leaves them at
+    # their defaults: not simulated, no persona, empty transcript.
+    simulated: bool = False
+    persona_id: str | None = None
+    transcript: tuple[TranscriptEntry, ...] = field(default_factory=tuple)
 
     def to_json_dict(self) -> dict[str, Any]:
         return {

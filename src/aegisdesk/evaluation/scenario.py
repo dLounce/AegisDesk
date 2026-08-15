@@ -6,6 +6,7 @@ from aegisdesk.agents.state import WorkflowPhase
 from aegisdesk.approval import ApprovalDecision
 from aegisdesk.domain.enums import AgentName, TicketStatus
 from aegisdesk.domain.ids import WorkflowId
+from aegisdesk.evaluation.persona import Persona
 from aegisdesk.evaluation.trajectory import TrajectoryRubric
 
 # A scenario is declarative data and nothing else. It carries no reference to the guard, the
@@ -53,8 +54,23 @@ class Scenario:
     # control-plane handle); scored into `trajectory_acceptable` and never an authorization input.
     # None means the scenario declares no golden path and is not trajectory-scored.
     rubric: TrajectoryRubric | None = None
+    # An optional simulated employee (S18). When set, the employee side is driven dynamically by
+    # this persona rather than by static EmployeeTurns; `turns` then carries reviewer turns only
+    # (reviewers stay scripted and trusted — a simulated reviewer is out of scope). Pure declarative
+    # data: a Persona holds no control-plane handle, and its claimed_id is a claim the session
+    # authenticates, never authority.
+    persona: Persona | None = None
 
     def __post_init__(self) -> None:
+        if self.persona is not None:
+            # The persona owns every employee turn; a static EmployeeTurn alongside it would be two
+            # competing employee voices. Reviewer-only (or empty) turns are allowed.
+            if any(isinstance(turn, EmployeeTurn) for turn in self.turns):
+                raise ValueError(
+                    "a persona-driven scenario supplies employee turns via the persona; "
+                    "turns may carry reviewer turns only"
+                )
+            return
         if not self.turns:
             raise ValueError("a scenario needs at least one turn")
         if not isinstance(self.turns[0], EmployeeTurn):
