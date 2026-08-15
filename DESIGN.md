@@ -762,6 +762,58 @@ destructive scenarios executed and authorized, rate aggregation). Corpus is 11 s
 100 task-success / 100 trajectory-safe / 100 trajectory-acceptable / 0 unauthorized / 0
 policy-bypass / 100 fail-closed.*
 
+### AD-57 — The live persona employee is a live-model input generator, never a control-plane actor
+
+S20 gives the simulated employee (AD, S18) a live-model backing so later reliability evaluation can
+measure genuine model-input stochasticity instead of S19's seeded phrasing selection.
+`LivePersonaEmployee` (`evaluation/live_persona.py`) implements the same `SimulatedEmployee`
+protocol behind the runner's existing `EmployeeFactory` seam; it is an input/test generator and
+does **not** address task integrity or prompt injection.
+
+*Same untrusted shape, no new capability.* Like `SeededPersonaEmployee`, the live employee holds no
+guard, access backend, approval store, session, minting key, reviewer capability, or policy object —
+the protocol exposes none and `live_employee_factory` passes none. Its only output is
+`(claimed_id, message) | None`, and `claimed_id` is always the persona's, never chosen by the model:
+an identity-confusion attempt is therefore confined to message *content*, which the session still
+authenticates against the directory (identity invariant unchanged). It receives only the enum-only
+`EmployeeObservation` (phase + missing slots); no agent- or model-authored prose is ever exposed to
+it, preserving the S18 closure of the system-output→instruction channel. Reviewers stay scripted and
+trusted — the employee surface has no decision/approval method, so a simulated employee can never
+render a reviewer verdict.
+
+*Fail-safe, never fail-open.* Any provider timeout, transport error, malformed reply, or empty
+output is caught and reduced to a safe value — an empty opening message or a stopped reply (`None`)
+— which drives the workflow toward clarification or refusal. Because every authorization is
+downstream and independent of this input, a failing or actively hostile employee model can only make
+a scenario *fail*; it can never produce an execution or an approval (regression-tested end-to-end: a
+compromised employee that classifies to a full grant and tries to self-approve still pauses at
+approval and executes nothing).
+
+*Independent configuration and isolated telemetry.* The employee model reads its own
+`AEGISDESK_PERSONA_MODEL_*` namespace (`PersonaModelSettings`) with a nonzero sampling `temperature`
+as the stochasticity knob, deliberately separate from the agent model's `AEGISDESK_MODEL_*`: the
+employee model is the harness, not the system under test, and coupling the two configs would let one
+change alter both. It shares only the stateless `build_chat_client` transport, built fresh per
+persona (hence per scenario/trial) so no mutable state crosses trials (the `run_passk`
+factory-statelessness contract, agent-security F5). The live employee's own call telemetry is
+harness diagnostics and is never merged into `ScenarioResult` cost/latency, which continue to
+describe only the SUT model.
+
+*Gated and offline by default.* The default `ScenarioRunner` and `run_passk` still use
+`SeededPersonaEmployee`; a live employee is opt-in via an injected factory. The live path is
+exercised only by a single `pytest.mark.live` smoke test (one provider call, skipped unless
+configured), excluded from the default `-m 'not live'` run. Measured live runs are non-deterministic
+and are never committed as baseline artifacts (NON_NEGOTIABLES §9). S20 delivers only the seam; a
+live pass^k reliability run and the seeded-vs-live comparison are S21.
+
+*Status: implemented and tested — 14 new offline tests (claimed_id fixed to persona; identity-claim
+confined to content; reply speaks only while awaiting info; slot hint is non-verbatim; fail-safe on
+provider error/empty for both opening and reply; oversized output bounded; no reviewer-decision
+surface; compromised-employee cannot self-approve or execute; persona telemetry excluded from SUT
+metrics; factory fails closed on incomplete config; independent config with nonzero default
+temperature; fresh stateless client per trial) plus one gated live smoke test. Full offline suite
+966 pass; scripted corpus and committed baseline/passk artifacts byte-identical and unchanged.*
+
 ## 4. Pause and resume semantics
 
 This is the most consequential runtime behaviour in the system and is treated as a hard

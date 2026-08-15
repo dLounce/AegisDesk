@@ -133,7 +133,7 @@ def test_factory_live_with_config_builds_live_model(monkeypatch: pytest.MonkeyPa
     # replaced with a stub so the unit test needs no network client and no provider SDK.
     from aegisdesk.agents import providers
 
-    monkeypatch.setattr(providers, "_build_openai_client", lambda settings: _StubClient("{}"))
+    monkeypatch.setattr(providers, "build_chat_client", lambda config, **kwargs: _StubClient("{}"))
     settings = ModelSettings(
         provider=ModelProvider.OPENAI_COMPATIBLE,
         model_name="gpt-4o-mini",

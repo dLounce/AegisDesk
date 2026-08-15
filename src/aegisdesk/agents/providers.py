@@ -1,7 +1,9 @@
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
+
+from pydantic import SecretStr
 
 from aegisdesk.agents.model import Model, ModelRequest, ModelResponse, ScriptedModel
 from aegisdesk.config import ModelSettings
@@ -118,21 +120,37 @@ def build_model(
     if not settings.is_live:
         return scripted_factory()
     settings.require_live()
-    return LiveModel(_build_openai_client(settings))
+    return LiveModel(build_chat_client(settings))
 
 
-def _build_openai_client(settings: ModelSettings) -> ChatClient:
+# The minimal config a live transport needs. A Protocol so build_chat_client serves both
+# ModelSettings (the agent model) and PersonaModelSettings (the S20 employee model) without the
+# provider layer importing the persona config — the two stay independent (AD-57).
+class TransportConfig(Protocol):
+    model_name: str
+    base_url: str | None
+    api_key: SecretStr | None
+    timeout_seconds: float
+
+
+# Builds the shared ChatOpenAI-compatible transport for any live caller. `temperature` is passed
+# through only when supplied, so the agent model keeps the provider default while the employee
+# model can request stochastic sampling. langchain is imported lazily so this module never requires
+# the live stack at import time. The caller must have run require_live() first (api_key present).
+def build_chat_client(config: TransportConfig, *, temperature: float | None = None) -> ChatClient:
     from langchain_openai import ChatOpenAI
 
-    assert settings.api_key is not None  # guaranteed by require_live
-    chat = ChatOpenAI(
-        model=settings.model_name,
-        base_url=settings.base_url,
-        api_key=settings.api_key,
-        timeout=settings.timeout_seconds,
-        max_retries=0,
-    )
-    return _OpenAIChatClient(chat)
+    assert config.api_key is not None  # guaranteed by the caller's require_live()
+    kwargs: dict[str, Any] = {
+        "model": config.model_name,
+        "base_url": config.base_url,
+        "api_key": config.api_key,
+        "timeout": config.timeout_seconds,
+        "max_retries": 0,
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    return _OpenAIChatClient(ChatOpenAI(**kwargs))
 
 
 # Thin transport adapter around a ChatOpenAI-compatible client. It confines the langchain types to
