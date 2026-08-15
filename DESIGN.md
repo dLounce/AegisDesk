@@ -719,6 +719,49 @@ rates invariant to telemetry, artifact field whitelist, None-aware aggregate mat
 empty/unmeasured/mixed/measured, deterministic entrypoint artifact byte-identical across runs);
 scripted corpus unchanged at 100/100/0/0/100.*
 
+### AD-56 — Golden trajectories score an acceptable path, orthogonally to task success and security
+
+S17 adds a third, independent evaluation axis: did the workflow take an *acceptable* path, not just
+reach a correct final state (`task_success`) or avoid a security-lifecycle violation
+(`trajectory_safe`). It is a pure scorer (`evaluation/trajectory.py`) over an `ObservedTrajectory`
+and a declarative `TrajectoryRubric`, both evaluation data. The rubric composes four typed checks:
+an ordered `AgentPathCheck`, an ordered `PhasePathCheck`, one or more `ActionLifecycleCheck`s keyed
+by `ProtectedOperation`, and a `ForbiddenEvents` set. Each check has an `EXACT` or `SUBSEQUENCE`
+match mode, so a rubric can pin a precise sequence or admit legitimate bounded variants. `Scenario`
+gained an optional `rubric` field (pure data); all 11 corpus scenarios declare one, including two
+new destructive golden scenarios (`revoke_access_approved`, `modify_permissions_approved`) built on
+legitimate seed access — a prod-db admin grant is approved and executed, establishing current
+access, then revoked/modified under a second approval, so every execution stays proposal- and
+approval-paired and the trajectory remains safe.
+
+*The observed trajectory is authoritative or evaluation-only, never model prose.* Phase path comes
+from the real Supervisor's per-turn `TurnResult.phase`; the audit event sequence is the append-only
+trail, and each `ActionLifecycleCheck` reads the operation from the `PROPOSAL_PERSISTED` event's
+authoritative `PolicyDecision.operation`, never from model output. The agent path is captured by an
+evaluation-only `_AgentPathRecorder` that wraps the scenario's model, records `request.agent`, and
+delegates `respond` unchanged; it is built fresh per scenario, holds no guard/access/approval/
+minting handle (the `Model` protocol exposes none), and its observation is never an authorization
+input.
+
+*Acceptability is orthogonal to task success and to every security metric.* `trajectory_acceptable`
+is `True`/`False` when a rubric is present and `None` when absent ("not evaluated", never silently
+acceptable). A forbidden path fails acceptability even when `task_success` is true — proven both as
+a pure-scorer test (an executed-but-forbidden trajectory) and end-to-end (a deliberately wrong
+rubric on a successful scenario). Security metrics (`trajectory_safe`, `unauthorized_execution`,
+`policy_bypass`, `fail_closed`) are proven identical with rubrics present and stripped; the golden
+score never feeds them. Per project decision, `trajectory_acceptable` is **not** serialized: the
+committed §20 artifact keeps its fixed field whitelist, and only the aggregate
+`trajectory_acceptable_rate` / `trajectory_scored_count` are printed; `trajectory_score` is an
+in-memory diagnostic. `TrajectoryReport.acceptable` gates on all checks passing.
+
+*Status: implemented and tested — 18 new tests (agent/phase EXACT and SUBSEQUENCE, full/partial/
+rejected lifecycle, operation-required, decision-status matching, forbidden-event orthogonality,
+score/empty-rubric, no-control-plane-import guardrail, corpus all-acceptable, wrong-rubric
+orthogonality end-to-end, security-rate invariance to rubric presence, unrubriced-not-scored,
+destructive scenarios executed and authorized, rate aggregation). Corpus is 11 scenarios at
+100 task-success / 100 trajectory-safe / 100 trajectory-acceptable / 0 unauthorized / 0
+policy-bypass / 100 fail-closed.*
+
 ## 4. Pause and resume semantics
 
 This is the most consequential runtime behaviour in the system and is treated as a hard

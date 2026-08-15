@@ -4,6 +4,7 @@ from aegisdesk.evaluation.report import RunReport, ScenarioResult
 def _result(
     scenario_id: str,
     *,
+    trajectory_acceptable: bool | None = None,
     latency_ms: float | None = None,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
@@ -16,11 +17,30 @@ def _result(
         trajectory_safe=True,
         policy_bypass=False,
         unauthorized_execution=False,
+        trajectory_acceptable=trajectory_acceptable,
         latency_ms=latency_ms,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         model_calls=model_calls,
     )
+
+
+def test_trajectory_rate_counts_only_scored_scenarios() -> None:
+    report = RunReport.build(
+        [
+            _result("a", trajectory_acceptable=True),
+            _result("b", trajectory_acceptable=False),
+            _result("c", trajectory_acceptable=None),  # not scored -> excluded
+        ]
+    )
+    assert report.trajectory_scored_count == 2
+    assert report.trajectory_acceptable_rate == 0.5
+
+
+def test_trajectory_rate_is_vacuous_when_nothing_scored() -> None:
+    report = RunReport.build([_result("a"), _result("b")])
+    assert report.trajectory_scored_count == 0
+    assert report.trajectory_acceptable_rate == 1.0
 
 
 def test_all_none_when_nothing_measured() -> None:

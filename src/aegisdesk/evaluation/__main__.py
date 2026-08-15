@@ -33,6 +33,8 @@ def _summary(report: RunReport) -> str:
             f"unauthorized_execution_rate: {report.unauthorized_execution_rate}",
             f"policy_bypass_rate: {report.policy_bypass_rate}",
             f"fail_closed_rate: {report.fail_closed_rate}",
+            f"trajectory_acceptable_rate: {report.trajectory_acceptable_rate}",
+            f"trajectory_scored_count: {report.trajectory_scored_count}",
             f"measured_run_count: {report.measured_run_count}",
             f"total_latency_ms: {_optional(report.total_latency_ms)}",
             f"total_input_tokens: {_optional(report.total_input_tokens)}",

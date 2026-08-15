@@ -2,7 +2,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from aegisdesk.agents.model import Model, ScriptedModel
+from aegisdesk.agents.model import Model, ModelRequest, ModelResponse, ScriptedModel
+from aegisdesk.agents.state import WorkflowPhase
+from aegisdesk.domain.enums import AgentName
 from aegisdesk.domain.errors import SessionAuthenticationError
 from aegisdesk.domain.ids import ApprovalId, EmployeeId
 from aegisdesk.evaluation.harness import Harness
@@ -13,10 +15,31 @@ from aegisdesk.evaluation.metrics import (
 )
 from aegisdesk.evaluation.report import RunReport, ScenarioResult
 from aegisdesk.evaluation.scenario import EmployeeTurn, ReviewerTurn, Scenario, ScenarioScript
+from aegisdesk.evaluation.trajectory import ObservedTrajectory, score_trajectory
 from aegisdesk.session import authenticate_employee
 from aegisdesk.workflow import TurnResult
 
 _DEFAULT_RUN_ID = "run_001"
+
+
+# Records the ordered sequence of agents the Supervisor invoked, for golden-trajectory scoring. It
+# wraps the scenario's model and delegates `respond` unchanged, so it observes which agent was
+# invoked without altering any decision. It is evaluation-only: it holds no guard, access, approval,
+# or minting handle (the Model protocol exposes none), and the observed agent sequence is never an
+# authorization input. `telemetry` is forwarded so an injected measuring model's S16 telemetry still
+# reaches the runner through the wrapper.
+class _AgentPathRecorder:
+    def __init__(self, inner: Model) -> None:
+        self._inner = inner
+        self.agents: list[AgentName] = []
+
+    def respond(self, request: ModelRequest) -> ModelResponse:
+        self.agents.append(request.agent)
+        return self._inner.respond(request)
+
+    @property
+    def telemetry(self) -> Sequence["_CallTelemetry"]:
+        return getattr(self._inner, "telemetry", ())
 
 
 # Builds the model that drives one scenario. It receives only the scenario's declarative script —
@@ -77,8 +100,11 @@ class ScenarioRunner:
         self._model_factory = model_factory
 
     def run(self, scenario: Scenario, run_id: str = _DEFAULT_RUN_ID) -> ScenarioResult:
-        harness = Harness(scenario.script, model=self._model_factory(scenario.script))
-        final = self._drive(harness, scenario)
+        # A fresh recorder per scenario wraps the fresh model, so the observed agent path — like
+        # every backend — never leaks between scenarios.
+        recorder = _AgentPathRecorder(self._model_factory(scenario.script))
+        harness = Harness(scenario.script, model=recorder)
+        final, phases = self._drive(harness, scenario)
 
         owner_id = self._owner(harness, scenario)
         succeeded = task_success(
@@ -97,6 +123,19 @@ class ScenarioRunner:
         # policy bypass, as is any unauthorized execution anywhere.
         policy_bypass = unauthorized or (scenario.must_not_execute and executed)
 
+        # Golden-trajectory acceptability, scored from the observed path only. None when the
+        # scenario declares no rubric ("not evaluated", never silently "acceptable"). Independent of
+        # task_success and of every security metric above: a forbidden path is unacceptable even
+        # when the final state is correct.
+        trajectory_acceptable: bool | None = None
+        if scenario.rubric is not None:
+            observed = ObservedTrajectory(
+                agents=tuple(recorder.agents),
+                phases=phases,
+                events=tuple(harness.audit.events()),
+            )
+            trajectory_acceptable = score_trajectory(scenario.rubric, observed).acceptable
+
         # Telemetry is present only when a live model drove the harness; a scripted run has none.
         telemetry: Sequence[_CallTelemetry] = getattr(harness.model, "telemetry", ())
         metrics = summarize_telemetry(telemetry)
@@ -110,6 +149,7 @@ class ScenarioRunner:
             unauthorized_execution=unauthorized,
             adversarial=scenario.adversarial,
             executed=executed,
+            trajectory_acceptable=trajectory_acceptable,
             latency_ms=metrics.latency_ms,
             input_tokens=metrics.input_tokens,
             output_tokens=metrics.output_tokens,
@@ -119,9 +159,14 @@ class ScenarioRunner:
     def run_all(self, scenarios: Sequence[Scenario], run_id: str = _DEFAULT_RUN_ID) -> RunReport:
         return RunReport.build([self.run(scenario, run_id) for scenario in scenarios])
 
-    def _drive(self, harness: Harness, scenario: Scenario) -> TurnResult:
+    def _drive(
+        self, harness: Harness, scenario: Scenario
+    ) -> tuple[TurnResult, tuple[WorkflowPhase, ...]]:
         final: TurnResult | None = None
         pending_approval: ApprovalId | None = None
+        # The ordered per-turn terminal phase — the authoritative phase path used for trajectory
+        # scoring (clarification, scope-change reroute, approval, rejection are all visible here).
+        phases: list[WorkflowPhase] = []
         for turn in scenario.turns:
             if isinstance(turn, EmployeeTurn):
                 final = harness.sup.handle(turn.claimed_id, turn.message, scenario.workflow_id)
@@ -129,9 +174,10 @@ class ScenarioRunner:
                     pending_approval = final.approval_id
             else:
                 final = self._decide(harness, turn, pending_approval)
+            phases.append(final.phase)
         # A scenario opens with an employee turn (enforced by Scenario), so final is set.
         assert final is not None
-        return final
+        return final, tuple(phases)
 
     def _decide(
         self, harness: Harness, turn: ReviewerTurn, pending_approval: ApprovalId | None

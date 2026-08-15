@@ -12,6 +12,7 @@ from aegisdesk.evaluation.harness import Harness
 from aegisdesk.evaluation.runner import ScenarioRunner
 from aegisdesk.evaluation.scenario import EmployeeTurn, Scenario, ScenarioScript
 from aegisdesk.evaluation.scenarios import corpus
+from aegisdesk.evaluation.trajectory import AgentPathCheck, TrajectoryRubric
 
 _ARTIFACT_FIELDS = {
     "scenario_id",
@@ -170,6 +171,62 @@ def test_artifact_records_expose_only_the_approved_fields() -> None:
         assert set(record) == _ARTIFACT_FIELDS
         assert record["cost_usd"] is None
         assert record["latency_ms"] is None
+
+
+def test_corpus_trajectories_all_acceptable() -> None:
+    report = ScenarioRunner().run_all(corpus())
+    assert report.trajectory_scored_count == len(corpus())
+    assert report.trajectory_acceptable_rate == 1.0
+    assert all(r.trajectory_acceptable for r in report.results)
+
+
+def test_forbidden_trajectory_is_unacceptable_even_when_task_succeeds() -> None:
+    # A deliberately wrong golden path over a scenario that still reaches its correct final state:
+    # task_success stays True while trajectory_acceptable is False. This is the orthogonality
+    # guarantee end-to-end — a forbidden trajectory is caught even on a successful outcome.
+    routine = next(s for s in corpus() if s.id == "routine_vpn")
+    wrong = dataclasses.replace(
+        routine,
+        rubric=TrajectoryRubric(
+            agent_path=AgentPathCheck((AgentName.ROUTER, AgentName.ESCALATION))
+        ),
+    )
+    result = ScenarioRunner().run(wrong)
+    assert result.task_success
+    assert result.trajectory_acceptable is False
+
+
+def test_security_metrics_invariant_to_rubric_presence() -> None:
+    with_rubrics = ScenarioRunner().run_all(corpus())
+    stripped = ScenarioRunner().run_all(
+        tuple(dataclasses.replace(s, rubric=None) for s in corpus())
+    )
+    for attr in (
+        "task_success_rate",
+        "trajectory_safe_rate",
+        "unauthorized_execution_rate",
+        "policy_bypass_rate",
+        "fail_closed_rate",
+    ):
+        assert getattr(with_rubrics, attr) == getattr(stripped, attr)
+    assert with_rubrics.trajectory_scored_count == len(corpus())
+    assert stripped.trajectory_scored_count == 0
+
+
+def test_scenario_without_rubric_is_not_trajectory_scored() -> None:
+    routine = next(s for s in corpus() if s.id == "routine_vpn")
+    result = ScenarioRunner().run(dataclasses.replace(routine, rubric=None))
+    assert result.trajectory_acceptable is None
+
+
+def test_destructive_scenarios_execute_and_stay_authorized() -> None:
+    results = {r.scenario_id: r for r in ScenarioRunner().run_all(corpus()).results}
+    for scenario_id in ("revoke_access_approved", "modify_permissions_approved"):
+        result = results[scenario_id]
+        assert result.executed
+        assert not result.unauthorized_execution
+        assert result.trajectory_safe
+        assert result.trajectory_acceptable
 
 
 def test_reviewer_turn_without_a_pending_approval_is_rejected() -> None:
